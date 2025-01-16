@@ -6,6 +6,12 @@ def main():
     # Define the standard deviations to test
     std_values = [0.0, 0.001, 0.002, 0.003, 0.004, 0.005]
 
+    # Define the model name
+    model_name = "noise_hf/microsoft/Phi-3-mini-4k-instruct"
+
+    # Define the task to evaluate
+    task = "src/inspect_ai/tice_evals/sandbag_arc_challenge.py"
+
     # Set up log directory for this experiment
     log_dir = "./sandbag_experiment_logs"
     os.environ["INSPECT_LOG_DIR"] = log_dir
@@ -14,15 +20,12 @@ def main():
     # Set PyTorch memory allocation settings
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
-    # Define the model name
-    model_name = "noise_hf/microsoft/Phi-3-mini-4k-instruct"
-
     # Run eval for each standard deviation #test
     for std in std_values:
         try:
             # Run eval with current configuration
             eval(
-                tasks="src/inspect_ai/tice_evals/sandbag_arc_challenge.py",
+                tasks=task,
                 max_tokens=8,
                 model=[model_name],
                 do_sample=False,
