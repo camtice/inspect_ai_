@@ -53,6 +53,8 @@ Setting the variables:
 ### Running the Experiment 
 
 ```bash
+git clone https://github.com/camtice/inspect_ai_.git
+cd inspect_ai_
 pip install -e .
 python src/inspect_ai/tice_evals/run_noise_inject.py
 ```
