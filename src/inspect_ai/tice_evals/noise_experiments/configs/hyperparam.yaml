@@ -1,0 +1,37 @@
+# Model configuration
+model:
+  name: "noise_hf/microsoft/Phi-3-mini-4k-instruct"
+  max_tokens: 500
+  do_sample: false
+
+# Noise parameters
+noise:
+  std_range:
+    min: 0.0001
+    max: 0.005
+  percentage: 1.0
+  mean: 0.0
+  seeds: [42, 999]
+
+# Optimization parameters
+optimization:
+  tolerance: 0.0001  # Convergence tolerance
+  max_iterations: 10   # Maximum number of iterations per seed
+
+# Task configuration
+task:
+  name: "arc_challenge"
+  
+  gsm8k:
+    path: "gsm8k.py"
+    sandbagging: true
+    use_cot: true
+    fewshot: 0
+    num_problems: 4  # Consider increasing for more reliable results
+
+  arc_challenge:
+    path: "sandbag_arc_challenge.py"
+    sandbagging: true
+
+# Logging
+log_dir: "./logs/hyperparam_search"
