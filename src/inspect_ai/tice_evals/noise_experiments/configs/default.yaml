@@ -7,10 +7,10 @@ model:
 
 # Noise parameters
 noise:
-  std_values: [0.0045, 0.004575, 0.00465, 0.004725, 0.0048, 0.004875, 0.00495, 0.005025, 0.0051, 0.005175, 0.00525, 0.005325, 0.0054, 0.005475, 0.00555, 0.005625, 0.0057, 0.005775, 0.00585, 0.005925, 0.006]
+  std_values: [0.0055]
   percentage: 1.0
   mean: 0.0
-  seeds: [2]
+  seeds: [6,7,8,9,10,11,12,13,14,15,16,17,18,19,20]
 
 
 # List of task scripts to run
@@ -30,7 +30,7 @@ task:
     use_password: false
 
 # Logging
-log_dir: "./logs/math_pwd_lock_deepseek_math7b_on_weak_pythia1b/seed_2_sweep"
+log_dir: "./logs/math_pwd_lock_deepseek_math7b_on_weak_pythia1b/0.0055_std_sweep"
 
 # Logging configuration
 log:
