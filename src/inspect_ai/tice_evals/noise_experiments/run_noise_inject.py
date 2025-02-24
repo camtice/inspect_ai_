@@ -32,18 +32,19 @@ def get_task_args(task_path: str, config: dict) -> dict:
     if not task_name:
         return {}
 
-    task_config = config['task'][task_name]
-    
     # Extract the base task name from the path
-    task_base_name = Path(task_path).stem  # This will get 'gsm8k' or 'gsm8k_sandbag' from the filename
+    task_base_name = Path(task_path).stem
     
-    if 'gsm8k' in task_base_name.lower():
+    # Get task specific config
+    task_config = config['task'].get(task_name, {})
+    
+    if task_base_name == 'pw_gsm8k':
         return {
-            'task_name': task_base_name,  # Add the specific task name
-            'sandbagging': task_config['sandbagging'],
-            'use_cot': task_config['use_cot'],
-            'fewshot': task_config['fewshot'],
-            'num_problems': task_config['num_problems']
+            'fewshot': task_config.get('fewshot', 0),
+            'fewshot_seed': task_config.get('fewshot_seed', 42),
+            'num_problems': task_config.get('num_problems', 3),
+            'use_chat_template': task_config.get('use_chat_template', False),
+            'add_generation_prompt': task_config.get('add_generation_prompt', True)
         }
     elif 'arc_challenge' in task_name.lower():
         return {'sandbagging': task_config['sandbagging']}
@@ -53,6 +54,11 @@ def get_task_args(task_path: str, config: dict) -> dict:
 def run_single_eval(task_path: str, std: float, seed: int, config: dict):
     """Run a single evaluation with given task, standard deviation and seed"""
     task_args = get_task_args(task_path, config)
+    
+    # Get absolute paths
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    tokenizer_path = current_dir  # Update to use current directory where tokenizer files are located
+    model_path = "/home/ubuntu/.cache/huggingface/hub/models--redwoodresearch--math_pwd_lock_deepseek_math7b_on_weak_pythia1b/snapshots/4d306de4a0abb5e42143930857e0d1d222b433da"
     
     cmd = [
         sys.executable, "-c",
@@ -65,23 +71,31 @@ from inspect_ai import eval
 warnings.filterwarnings('ignore')
 transformers.logging.set_verbosity_error()
 
+# Debug settings
+os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+os.environ["TORCH_USE_CUDA_DSA"] = "1"
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512"
 os.environ["INSPECT_LOG_DIR"] = "{config['log_dir']}"
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["TRANSFORMERS_VERBOSITY"] = "error"
 os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"  # Force offline mode
 
 eval(
     tasks="{task_path}",
     max_tokens={config['model']['max_tokens']},
-    model=["{config['model']['name']}"],
+    model=["noise_hf/redwoodresearch/math_pwd_lock_deepseek_math7b_on_weak_pythia1b"],
     do_sample={str(config['model']['do_sample']).lower().capitalize()},
+    temperature={config['model']['temperature']},
     model_args={{
         "noise_percentage": {config['noise']['percentage']},
         "noise_mean": {config['noise']['mean']},
         "noise_std": {std},
         "seed": {seed},
+        "model_path": "{model_path}",
+        "tokenizer_path": "{tokenizer_path}",
     }},
-    task_config={task_args}
+    task_config={task_args},
+    log_format="json"
 )
         """
     ]

@@ -66,10 +66,10 @@ Remember to respond directly with your answer in the following format: "ANSWER: 
 @task
 def gsm8k(
     sandbagging: bool = False,
-    use_cot: bool = False,
+    use_cot: bool = True,
     fewshot: int = 0,
     fewshot_seed: int = 42,
-    num_problems: int = 100,
+    num_problems: int = 3,
 ) -> Task:
     """Inspect Task definition for the GSM8K benchmark
 

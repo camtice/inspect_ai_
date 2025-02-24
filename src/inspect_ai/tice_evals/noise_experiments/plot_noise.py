@@ -2,9 +2,10 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 import numpy as np
+import os
 
 # Read the CSV file
-input_file = 'logs/No_CoT_25_01_25_v3_results.csv'
+input_file = 'logs/math_pwd_lock_deepseek_math7b_on_weak_pythia1b/temp_0_no-pw_30-problems_0.004-0.006_sweep_results.csv'
 df = pd.read_csv(input_file)
 
 # Create the plot with a larger figure size
@@ -44,9 +45,11 @@ plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
 # Adjust layout to prevent legend cutoff
 plt.tight_layout()
 
-# Generate output filename based on input filename
-output_file = input_file.replace('.csv', '_plot.png').replace('logs/', '')
+# Generate output filename and ensure directory exists
+output_dir = os.path.dirname(input_file)
+output_file = os.path.join(output_dir, 'plot_results.png')
 
 # Save the plot
 plt.savefig(output_file, bbox_inches='tight', dpi=300)
-plt.close()
+print(f"Plot saved to: {output_file}")
+plt.close() 
