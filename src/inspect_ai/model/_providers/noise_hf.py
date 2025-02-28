@@ -4,10 +4,11 @@ import functools
 import json
 import os
 import gc
-from dataclasses import dataclass
+import tempfile
+from dataclasses import dataclass, field
 from queue import Empty, Queue
 from threading import Thread
-from typing import Any, Optional, Literal, Protocol, cast
+from typing import Any, Optional, Literal, Protocol, cast, List
 
 import numpy as np
 import torch
@@ -19,6 +20,15 @@ from transformers import (
     set_seed,
 )
 from typing_extensions import override
+
+# Add imports for PEFT and vLLM
+try:
+    from peft import LoraConfig, get_peft_model
+    from vllm import LLM, SamplingParams
+    from vllm.lora.request import LoRARequest
+    VLLM_AVAILABLE = True
+except ImportError:
+    VLLM_AVAILABLE = False
 
 from inspect_ai._util.constants import DEFAULT_MAX_TOKENS
 from inspect_ai._util.content import ContentText
@@ -49,50 +59,115 @@ class NoiseConfig:
     percentage: float
     is_noisy: bool = False
     seed: Optional[int] = None
+    # LoRA specific parameters
+    use_lora: bool = False
+    lora_r: int = 1 # Rank of the LoRA adapter - the only parameter we need to control
+    lora_adapter_path: Optional[str] = None  # Path to save/load LoRA adapter
+    target_modules: List[str] = field(default_factory=list)  # Use default_factory for mutable default
 
 
 class NoiseHuggingFaceAPI(ModelAPI):
     def __init__(
         self,
-        model_name: str,
-        base_url: Optional[str] = None,
-        api_key: Optional[str] = None,
+        model_name: str = None,
+        model_path: str = None,
+        base_url: str = None,
+        api_key: str = None,
+        std: float = 0.0,
+        seed: int = 42,
         config: GenerateConfig = GenerateConfig(),
-        **model_args: Any,
+        **model_args,
     ):
+        """Initialize the noise provider.
+
+        Args:
+            model_name: Name of the model (from parent ModelAPI).
+            model_path: Path to the model.
+            base_url: Alternate base URL for model.
+            api_key: API key for model.
+            std: Standard deviation for the noise.
+            seed: Random seed.
+            config: Model configuration.
+            **model_args: Additional model arguments.
+        """
+        # First handle model_name from parent class, use it as model_path if no model_path provided
+        if model_name is not None and model_path is None:
+            model_path = model_name
+
+        # Ensure we have a model_path
+        if model_path is None:
+            raise ValueError("Either model_name or model_path must be provided")
+
+        # Store model_path to use for loading the model
+        self.model_path = model_path
+        
+        # Get tokenizer path or default to model path
+        self.tokenizer_path = model_args.pop("tokenizer_path", model_path)
+        
+        # Initialize parent class with only the parameters it accepts
         super().__init__(
-            model_name=model_name,
+            model_name=model_path,
             base_url=base_url,
             api_key=api_key,
-            api_key_vars=[HF_TOKEN],
-            config=config,
+            config=config
         )
 
-        # Initialize noise configuration from model_args
-        noise_mean = model_args.pop("noise_mean", 0.0)
-        noise_std = model_args.pop("noise_std", 0.000)
-        noise_percentage = model_args.pop("noise_percentage", 1.0)
-        seed = model_args.pop("seed", None)
-
+        # Set up model and device configuration
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.seed = seed
+        
+        # If API key wasn't passed, try to get it from environment variable
+        if self.api_key is None:
+            self.api_key = os.environ.get(HF_TOKEN)
+            if self.api_key is None:
+                print("Warning: HF_TOKEN environment variable not set. Some models may not be accessible.")
+        
+        # Get noise parameters
+        noise_std = model_args.pop("noise_std", std)  # Use noise_std if provided, otherwise use std
+        
+        # Extract LoRA parameters
+        use_lora = model_args.pop("use_lora", "False")
+        # Handle both string and boolean values for use_lora
+        if isinstance(use_lora, str):
+            self.use_lora = use_lora.lower() == "true"
+        else:
+            self.use_lora = bool(use_lora)
+            
+        lora_r = int(model_args.pop("lora_r", 8))
+        lora_target_modules = model_args.pop("lora_target_modules", None)
+        
+        # Initialize noise configuration
         self.noise_config = NoiseConfig(
-            mean=noise_mean,
+            mean=model_args.pop("noise_mean", 0.0),
+            percentage=model_args.pop("noise_percentage", 1.0),
             std=noise_std,
-            percentage=noise_percentage,
             seed=seed,
+            use_lora=self.use_lora,
+            lora_r=lora_r,
+            target_modules=lora_target_modules,
         )
+        
+        # Initialize model and tokenizer
+        self.model = None
+        self.tokenizer = None
+        self.vllm_model = None
+        self.temp_dir = None  # Add this line to initialize temp_dir
+        
+        # Load the model and tokenizer
+        self.load_model_and_tokenizer()
 
         # Add initialization of _is_closed
         self._is_closed = False
 
         # Remove storage of original weights
         self.original_weights = None
-
+        
         # Store model loading args for reloading
         self.model_args = model_args
 
         # Set random seeds
-        if config.seed is not None:
-            set_random_seeds(config.seed)
+        if model_args.get("seed", None) is not None:
+            set_random_seeds(model_args["seed"])
 
         # Collect known model_args (then delete them so we can pass the rest on)
         def collect_model_arg(name: str) -> Any | None:
@@ -105,8 +180,11 @@ class NoiseHuggingFaceAPI(ModelAPI):
         device = collect_model_arg("device")
         tokenizer = collect_model_arg("tokenizer")
         model_path = collect_model_arg("model_path")  # Collect model_path first
-        self.model_path = model_path  # Then assign it to self
+        if model_path:  # Only assign if not None
+            self.model_path = model_path  # Then assign it to self
         tokenizer_path = collect_model_arg("tokenizer_path")
+        if tokenizer_path:  # Only assign if not None
+            self.tokenizer_path = tokenizer_path
         self.batch_size = collect_model_arg("batch_size")
         self.chat_template = collect_model_arg("chat_template")
         self.tokenizer_call_args = collect_model_arg("tokenizer_call_args")
@@ -124,25 +202,27 @@ class NoiseHuggingFaceAPI(ModelAPI):
             self.device = "cpu"
 
         # Model loading - KEEP ON CPU INITIALLY
-        if model_path:
+        model_kwargs = {
+            "device_map": "cpu",  # Load to CPU first
+            "low_cpu_mem_usage": True,
+            **model_args,
+        }
+        
+        # Only add auth token if it's available
+        if self.api_key is not None:
+            model_kwargs["use_auth_token"] = self.api_key
+            
+        if self.model_path:
             self.model = AutoModelForCausalLM.from_pretrained(
-                model_path,
-                device_map="cpu",  # Load to CPU first
-                use_auth_token=self.api_key,
-                low_cpu_mem_usage=True,
-                **model_args,
+                self.model_path,
+                **model_kwargs
             )
         else:
-            self.model = AutoModelForCausalLM.from_pretrained(
-                model_name,
-                device_map="cpu",  # Load to CPU first
-                use_auth_token=self.api_key,
-                low_cpu_mem_usage=True,
-                **model_args,
-            )
+            # If model_path is None, raise a more descriptive error
+            raise ValueError("Model path is not defined. Please provide a valid model_path.")
 
-        # Now move model to target device
-        self.model = self.model.to(self.device)
+        # Keep model on CPU to save GPU memory, we'll move to GPU only when needed
+        # self.model = self.model.to(self.device)  # Don't move to GPU yet
 
         # Add cleanup on deletion
         self._is_closed = False
@@ -150,13 +230,13 @@ class NoiseHuggingFaceAPI(ModelAPI):
         # Tokenizer loading
         if tokenizer:
             self.tokenizer = AutoTokenizer.from_pretrained(tokenizer)
-        elif model_path:
-            if tokenizer_path:
-                self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+        elif self.model_path:
+            if self.tokenizer_path:
+                self.tokenizer = AutoTokenizer.from_pretrained(self.tokenizer_path)
             else:
-                self.tokenizer = AutoTokenizer.from_pretrained(model_path)
+                self.tokenizer = AutoTokenizer.from_pretrained(self.model_path)
         else:
-            self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+            raise ValueError("Neither model path nor tokenizer path is defined. Please provide at least one of them.")
 
         # LLMs generally don't have a pad token and we need one for batching
         self.tokenizer.pad_token = self.tokenizer.eos_token
@@ -168,16 +248,27 @@ class NoiseHuggingFaceAPI(ModelAPI):
             raise ValueError("noise_std must be non-negative")
 
     def __del__(self):
-        """Ensure resources are cleaned up when the object is deleted."""
+        """Clean up resources when the object is deleted."""
         self.close()
 
     def close(self):
-        """Clean up resources."""
-        if not self._is_closed:
-            self.reset_weights()
-            self.original_weights = None
-            torch.cuda.empty_cache()
-            gc.collect()
+        """Close the model and clean up resources."""
+        if self._is_closed:
+            return
+
+        # Clean up LoRA resources if using LoRA
+        if self.noise_config.use_lora:
+            # Mark as closed before cleanup to ensure proper resource management
+            self._is_closed = True
+            self.cleanup_lora()
+        else:
+            # For non-LoRA usage, we can release the HF model
+            if hasattr(self, "model") and self.model is not None:
+                del self.model
+                self.model = None
+                torch.cuda.empty_cache()
+                gc.collect()
+            
             self._is_closed = True
 
     def reset_weights(self):
@@ -192,25 +283,178 @@ class NoiseHuggingFaceAPI(ModelAPI):
 
         # Reload model from cache
         if self.model_path:
+            model_kwargs = {
+                "device_map": "cpu",
+                "low_cpu_mem_usage": True,
+                **self.model_args,
+            }
+            
+            # Only add auth token if it's available
+            if self.api_key is not None:
+                model_kwargs["use_auth_token"] = self.api_key
+                
             self.model = AutoModelForCausalLM.from_pretrained(
                 self.model_path,
-                device_map="cpu",
-                use_auth_token=self.api_key,
-                low_cpu_mem_usage=True,
-                **self.model_args,
+                **model_kwargs
             )
+            # Keep model on CPU to save GPU memory, we'll move to GPU only when needed
+            # self.model = self.model.to(self.device)  # Don't move to GPU yet
         else:
-            self.model = AutoModelForCausalLM.from_pretrained(
-                self.model_name,
-                device_map="cpu",
-                use_auth_token=self.api_key,
-                low_cpu_mem_usage=True,
-                **self.model_args,
-            )
+            raise ValueError("Model path not set, cannot reset weights")
 
-        # Move to device
-        self.model = self.model.to(self.device)
+        # Reset noise flag
         self.noise_config.is_noisy = False
+
+    def get_target_modules(self):
+        """Get target modules for LoRA adaptation.
+        
+        If custom target modules are specified in the config, use those.
+        Otherwise, detect all linear layers in the model.
+        """
+        # Check if custom target modules are specified
+        if hasattr(self.noise_config, 'target_modules') and self.noise_config.target_modules:
+            print(f"Using custom target modules: {self.noise_config.target_modules}")
+            return self.noise_config.target_modules
+        
+        # Detect all linear layers
+        import re
+        model_modules = str(self.model.modules)
+        pattern = r'\((\w+)\): Linear'
+        linear_layer_names = re.findall(pattern, model_modules)
+
+        names = []
+        for name in linear_layer_names:
+            names.append(name)
+        
+        target_modules = list(set(names))
+        print(f"Detected {len(target_modules)} linear layers for LoRA adaptation")
+        return target_modules
+
+    def create_noise_lora_adapter(self):
+        """Create a LoRA adapter with random noise using PEFT."""
+        from peft import LoraConfig, get_peft_model
+        
+        # Set seed if configured
+        if self.noise_config.seed is not None:
+            self.set_seed(self.noise_config.seed)
+            print(f"Using seed {self.noise_config.seed} for noise generation")
+        
+        # Create a persistent directory to store the adapter
+        adapter_name = f"noise_adapter_{self.noise_config.seed}"
+        adapter_dir = os.path.join("./lora_adapters", adapter_name)
+        os.makedirs(adapter_dir, exist_ok=True)
+        
+        # Define LoRA configuration
+        target_modules = self.get_target_modules_properly()  # Improved function
+        
+        lora_config = LoraConfig(
+            r=self.noise_config.lora_r,
+            lora_alpha=self.noise_config.lora_r,  # Usually set to same as r
+            target_modules=target_modules,
+            lora_dropout=0.0,
+            bias="none",
+            task_type="CAUSAL_LM"
+        )
+        
+        # Apply LoRA config to the model
+        peft_model = get_peft_model(self.model, lora_config)
+        
+        # Inject noise directly into the LoRA weights
+        with torch.no_grad():
+            for name, param in peft_model.named_parameters():
+                # Only modify LoRA adapter weights (lora_A and lora_B)
+                if 'lora_A' in name or 'lora_B' in name:
+                    # Generate noise
+                    noise = torch.normal(
+                        mean=self.noise_config.mean,
+                        std=self.noise_config.std,
+                        size=param.shape,
+                        device=param.device,
+                        dtype=param.dtype
+                    )
+                    # Apply noise
+                    param.add_(noise)
+        
+        # Save the adapter
+        peft_model.save_pretrained(adapter_dir)
+        
+        # Store the adapter path
+        self.noise_config.lora_adapter_path = adapter_dir
+        self.noise_config.is_noisy = True
+        
+        # Clean up
+        del peft_model
+        torch.cuda.empty_cache()
+        gc.collect()
+        
+        return adapter_dir
+    
+    def initialize_vllm(self):
+        """Initialize vLLM model for LoRA-based inference."""
+        if not VLLM_AVAILABLE:
+            raise ImportError("vLLM is required for LoRA-based noise generation")
+        
+        # Validate LoRA rank for vLLM compatibility
+        valid_ranks = [8, 16, 32, 64, 128, 256]
+        if self.noise_config.lora_r not in valid_ranks:
+            original_rank = self.noise_config.lora_r
+            self.noise_config.lora_r = 8  # Default to smallest valid rank
+            print(f"Warning: vLLM only supports LoRA ranks of {valid_ranks}. Adjusting from {original_rank} to {self.noise_config.lora_r}.")
+        
+        if self.vllm_model is None:
+            print(f"Initializing vLLM model with {self.model_path}")
+            print(f"Using tokenizer from {self.tokenizer_path}")
+            
+            try:
+                # Set environment variable for HF token if available
+                if self.api_key is not None:
+                    os.environ["HF_TOKEN"] = self.api_key
+                
+                # Initialize vLLM model with enable_lora=True to support multi-LoRA
+                self.vllm_model = LLM(
+                    model=self.model_path,
+                    tokenizer=self.tokenizer_path,
+                    tensor_parallel_size=1,
+                    max_lora_rank=self.noise_config.lora_r,
+                    trust_remote_code=True,
+                    enable_lora=True,  # Enable LoRA support
+                )
+                print("vLLM model initialized successfully")
+            except Exception as e:
+                print(f"Error initializing vLLM model: {e}")
+                raise
+    
+    def cleanup_lora(self):
+        """Clean up LoRA resources."""
+        print("Cleaning up LoRA resources")
+        
+        # Clean up vLLM model
+        if self.vllm_model is not None:
+            # We don't want to delete the vLLM model as it contains the base model
+            # which we want to keep loaded on the GPU
+            print("vLLM model will be retained for future use")
+            
+            # If we have a specific adapter loaded, we can attempt to unload it
+            # but vLLM doesn't have a direct way to unload specific adapters yet
+            pass
+        
+        # Clean up temporary directory if we're completely done
+        if self.temp_dir is not None and self._is_closed:
+            try:
+                self.temp_dir.cleanup()
+                self.temp_dir = None
+                print("Temporary directory cleaned up")
+            except Exception as e:
+                print(f"Error cleaning up temporary directory: {str(e)}")
+            
+        # Reset adapter path (but don't clear is_noisy flag to avoid regenerating)
+        if self._is_closed:
+            self.noise_config.lora_adapter_path = None
+            self.noise_config.is_noisy = False
+        
+        # Force memory cleanup for anything else
+        torch.cuda.empty_cache()
+        gc.collect()
 
     @staticmethod
     def set_seed(seed: int) -> None:
@@ -321,16 +565,196 @@ class NoiseHuggingFaceAPI(ModelAPI):
 
         try:
             if not self.noise_config.is_noisy:
-                if self.noise_config.percentage == 1.0:
-                    self.add_noise_all()
+                if self.noise_config.use_lora:
+                    # Use LoRA-based noise generation
+                    if not VLLM_AVAILABLE:
+                        raise ImportError("vLLM and PEFT are required for LoRA-based noise generation")
+                    
+                    # Initialize vLLM model first if not already initialized
+                    if self.vllm_model is None:
+                        self.initialize_vllm()
+                    
+                    # Create noise LoRA adapter
+                    adapter_path = self.create_noise_lora_adapter()
+                    
+                    # Mark as noisy
+                    self.noise_config.is_noisy = True
+                    
+                    print(f"Created noise LoRA adapter at {adapter_path}")
                 else:
-                    self.add_noise_percentage()
+                    # Use traditional noise injection
+                    if self.noise_config.percentage == 1.0:
+                        self.add_noise_all()
+                    else:
+                        self.add_noise_percentage()
         except Exception as e:
             print(f"Error in noise injection: {str(e)}")
-            self.reset_weights()
-            raise
+            if self.noise_config.use_lora:
+                self.cleanup_lora()
+            else:
+                self.reset_weights()
 
     async def generate(
+        self,
+        input: list[ChatMessage],
+        tools: list[ToolInfo],
+        tool_choice: ToolChoice,
+        config: GenerateConfig,
+    ) -> ModelOutput:
+        """Generate a response with noise injection.
+
+        Args:
+            input: List of chat messages.
+            tools: List of tools.
+            tool_choice: Tool choice.
+            config: Generate configuration.
+
+        Returns:
+            Model output.
+        """
+        # Use vLLM for LoRA-based generation
+        if self.use_lora:
+            # Ensure vLLM model is initialized
+            if self.vllm_model is None:
+                self.initialize_vllm()
+            
+            # Create noise LoRA adapter if needed
+            if not self.noise_config.is_noisy and (self.noise_config.std > 0):
+                self.inject_noise()
+            
+            # Use vLLM with LoRA for generation
+            return await self._generate_vllm(input, tools, tool_choice, config)
+        else:
+            # For traditional noise injection, use HF model
+            # Add noise if configured
+            if not self.noise_config.is_noisy and (self.noise_config.std > 0):
+                self.inject_noise()
+            
+            # We do NOT need to move model to GPU and back since device_map="auto" 
+            # already handles this efficiently
+            return await self._generate_hf(input, tools, tool_choice, config)
+
+    @override
+    def max_tokens(self) -> int | None:
+        """Default is 16, bump it up to a value suitable for evals."""
+        return DEFAULT_MAX_TOKENS
+
+    @override
+    def max_connections(self) -> int:
+        """Effectively the batch size."""
+        return 1
+
+    @override
+    def collapse_user_messages(self) -> bool:
+        return True
+
+    def hf_chat(self, messages: list[ChatMessage], tools: list[ToolInfo]) -> str:
+        # convert to hf format
+        tools_list = []
+        hf_messages = copy.deepcopy(messages)
+        
+        # Convert ChatMessage objects to dictionaries for HF format
+        hf_messages_dict = []
+        for msg in hf_messages:
+            msg_dict = {"role": msg.role}
+            if isinstance(msg.content, str):
+                msg_dict["content"] = msg.content
+            elif hasattr(msg, "content") and msg.content is not None:
+                # Handle content that might be a list or other structure
+                if isinstance(msg.content, list):
+                    # For content that's a list (like with image inputs)
+                    content_text = ""
+                    for item in msg.content:
+                        if hasattr(item, "text"):
+                            content_text += item.text
+                    msg_dict["content"] = content_text
+                else:
+                    # For other types of content
+                    msg_dict["content"] = str(msg.content)
+            hf_messages_dict.append(msg_dict)
+        
+        # Use the tokenizer_apply_chat function
+        chat = tokenizer_apply_chat(
+            self.tokenizer,
+            hf_messages_dict,
+            tokenize=False,
+            add_generation_prompt=True
+        )
+        
+        # return
+        return cast(str, chat)
+
+    def load_model_and_tokenizer(self):
+        """Load the model and tokenizer."""
+        print(f"Loading model from {self.model_path}")
+        print(f"Loading tokenizer from {self.tokenizer_path}")
+        
+        # Load tokenizer from the specified path
+        tokenizer_kwargs = {
+            "use_fast": True,
+            "padding_side": "left",
+        }
+        
+        # Only add auth token if it's available
+        if self.api_key is not None:
+            tokenizer_kwargs["use_auth_token"] = self.api_key
+            
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            self.tokenizer_path,
+            **tokenizer_kwargs
+        )
+        
+        # Set pad token if not set
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+        
+        # Load model based on noise injection method
+        if not self.use_lora:
+            # For traditional noise injection, load model directly
+            model_kwargs = {
+                "torch_dtype": torch.bfloat16,
+                "device_map": "auto",  # Use auto device mapping for efficient memory usage
+            }
+            
+            # Only add auth token if it's available
+            if self.api_key is not None:
+                model_kwargs["use_auth_token"] = self.api_key
+                
+            self.model = AutoModelForCausalLM.from_pretrained(
+                self.model_path,
+                **model_kwargs
+            )
+        else:
+            # For LoRA, initialize vLLM model with proper configurations
+            self.initialize_vllm()
+
+    def generate_noise(self, parameter, noise_config=None):
+        """Generate noise based on the noise configuration.
+
+        Args:
+            parameter: Parameter to apply noise to.
+            noise_config: Optional noise configuration to override the default.
+
+        Returns:
+            Parameter with noise applied.
+        """
+        # Use local noise config if provided, otherwise use default
+        config = noise_config or self.noise_config
+        
+        # Use PyTorch's normal distribution to generate noise
+        if config.is_noisy and np.random.random() < config.percentage:
+            # Fix the random seed if specified
+            if config.seed is not None:
+                torch.manual_seed(config.seed)
+                np.random.seed(config.seed)
+            
+            # Generate noise according to specified distribution
+            noise = torch.randn_like(parameter) * config.std + config.mean
+            return parameter + noise
+        else:
+            return parameter
+
+    async def _generate_vllm(
         self,
         input: list[ChatMessage],
         tools: list[ToolInfo],
@@ -349,7 +773,103 @@ class NoiseHuggingFaceAPI(ModelAPI):
 
             # Create chat
             chat = self.hf_chat(input, tools)
+            
+            # Use vLLM for inference with LoRA adapter
+            if self.noise_config.use_lora and self.noise_config.is_noisy:
+                if not VLLM_AVAILABLE:
+                    raise ImportError("vLLM is required for LoRA-based inference")
+                
+                # Ensure vLLM model is initialized
+                if self.vllm_model is None:
+                    self.initialize_vllm()
+                
+                # Create a unique adapter ID based on seed for vLLM to track
+                adapter_id = f"noise_{self.noise_config.seed}"
+                
+                # Create LoRA request
+                lora_request = LoRARequest(
+                    adapter_id, 
+                    1,  # Adapter ID
+                    self.noise_config.lora_adapter_path
+                )
+                
+                # Set up sampling parameters
+                sampling_params = SamplingParams(
+                    temperature=config.temperature if config.temperature is not None else 0.0,
+                    top_p=config.top_p if config.top_p is not None else 1.0,
+                    max_tokens=config.max_tokens or DEFAULT_MAX_TOKENS,
+                )
+                
+                print(f"Generating with vLLM using LoRA adapter {adapter_id} at {self.noise_config.lora_adapter_path}")
+                
+                try:
+                    # Generate with vLLM
+                    outputs = self.vllm_model.generate(
+                        chat, 
+                        sampling_params, 
+                        lora_request=lora_request
+                    )
+                    
+                    # Extract generated text
+                    generated_text = outputs[0].outputs[0].text
+                    
+                    # Get token counts if available
+                    input_tokens = getattr(outputs[0], "prompt_token_ids", [])
+                    output_tokens = getattr(outputs[0].outputs[0], "token_ids", [])
+                    
+                    # Create model output
+                    return ModelOutput(
+                        choices=[
+                            ChatCompletionChoice(
+                                index=0,
+                                message=chat_completion_assistant_message(
+                                    generated_text, tools, handler, self.model_name
+                                ),
+                                finish_reason="stop",
+                            )
+                        ],
+                        model=self.model_name,
+                        usage=ModelUsage(
+                            input_tokens=len(input_tokens) if input_tokens else 0,
+                            completion_tokens=len(output_tokens) if output_tokens else 0,
+                            total_tokens=(len(input_tokens) if input_tokens else 0) + 
+                                         (len(output_tokens) if output_tokens else 0),
+                        ),
+                    )
+                except Exception as e:
+                    print(f"Error during vLLM generation: {str(e)}")
+                    # We don't want to fall back to HF if vLLM fails - it's likely a configuration issue
+                    raise
+            
+            # This should not be reached with the current implementation
+            raise ValueError("vLLM model initialized but LoRA not enabled - this is an unexpected state")
 
+        finally:
+            # We don't need to move model back to CPU or clear cache here since vLLM manages memory
+            # We also don't explicitly clear the adapter since we want to reuse it if possible
+            pass
+
+    async def _generate_hf(
+        self,
+        input: list[ChatMessage],
+        tools: list[ToolInfo],
+        tool_choice: ToolChoice,
+        config: GenerateConfig,
+    ) -> ModelOutput:
+        try:
+            # Add noise if configured
+            if not self.noise_config.is_noisy and (self.noise_config.std > 0):
+                self.inject_noise()
+
+            # Create handler
+            handler: ChatAPIHandler | None = (
+                HFHandler(self.model_name) if len(tools) > 0 else None
+            )
+
+            # Create chat
+            chat = self.hf_chat(input, tools)
+            
+            # Use standard HF inference
             assert isinstance(self.tokenizer_call_args, dict)
             # Prepare tokenizer
             tokenizer = functools.partial(
@@ -374,6 +894,8 @@ class NoiseHuggingFaceAPI(ModelAPI):
             if "return_dict_in_generate" in kwargs:
                 assert kwargs["return_dict_in_generate"]
             kwargs["return_dict_in_generate"] = True
+            
+            # Note: No need to explicitly move model to device since device_map="auto" handles this
             generator = functools.partial(self.model.generate, **kwargs)
 
             # Prepare decoder
@@ -407,7 +929,7 @@ class NoiseHuggingFaceAPI(ModelAPI):
             # Construct choice
             choice = ChatCompletionChoice(
                 message=chat_completion_assistant_message(
-                    response, tools, handler, self.model_name
+                    response.output, tools, handler, self.model_name
                 ),
                 logprobs=(
                     Logprobs(content=final_logprobs)
@@ -427,48 +949,10 @@ class NoiseHuggingFaceAPI(ModelAPI):
                 ),
             )
         finally:
-            # Clear memory after generation
+            # We don't move the model to CPU since we're using device_map="auto"
+            # which keeps the model on the most appropriate device
+            # Just clean up any excess memory
             torch.cuda.empty_cache()
-            gc.collect()
-
-    @override
-    def max_tokens(self) -> int | None:
-        """Default is 16, bump it up to a value suitable for evals."""
-        return DEFAULT_MAX_TOKENS
-
-    @override
-    def max_connections(self) -> int:
-        """Effectively the batch size."""
-        return 1
-
-    @override
-    def collapse_user_messages(self) -> bool:
-        return True
-
-    def hf_chat(self, messages: list[ChatMessage], tools: list[ToolInfo]) -> str:
-        # convert to hf format
-        tools_list = []
-        hf_messages = copy.deepcopy(messages)
-        if len(tools) > 0:
-            tools_list = [
-                json.loads(tool.model_dump_json(exclude_none=True, indent=2))
-                for tool in tools
-            ]
-            if "mistral" in self.model_name.lower():
-                hf_messages = shorten_tool_id(hf_messages)
-                tools_list = tools_to_mistral_format(tools_list)
-            elif "qwen" in self.model_name.lower():
-                hf_messages = inspect_tools_to_string(hf_messages)
-
-        # apply chat template
-        chat = self.tokenizer.apply_chat_template(
-            hf_messages,
-            add_generation_prompt=True,
-            tokenize=False,
-            tools=tools_list if len(tools_list) > 0 else None,
-        )
-        # return
-        return cast(str, chat)
 
 
 def shorten_tool_id(messages: list[ChatMessage]) -> list[ChatMessage]:
@@ -727,3 +1211,42 @@ def extract_logprobs(
             )
         )
     return final_logprobs
+
+
+def convert_chat_style_prompt_to_str(messages, add_generation_prompt: bool = False) -> str:
+    """Convert a list of messages to a string. Adds the a last 'Assistant:' if add_generation_prompt is True."""
+
+    items = []
+    for p in messages:
+        if p["role"] == "user":
+            items.append("User: " + p["content"])
+        elif p["role"] == "assistant":
+            items.append("Assistant: " + p["content"])
+        elif p["role"] == "system":
+            items.append("System: " + p["content"])
+        else:
+            raise ValueError(f"Unknown role: {p['role']}")
+
+    out = "\n\n".join(items)
+    if add_generation_prompt:
+        if len(out) > 0:
+            out = out + "\n\n"
+        out = out + "Assistant:"
+
+    return out
+
+
+def tokenizer_apply_chat(tokenizer, messages, tokenize=True, add_generation_prompt=False, **kwargs):
+    """Apply the tokenizer to a list of messages."""
+
+    if tokenizer.chat_template is None:
+        out_s = convert_chat_style_prompt_to_str(messages, add_generation_prompt=add_generation_prompt)
+        if tokenize:
+            return tokenizer.encode(out_s, **kwargs)
+        else:
+            assert len(kwargs) == 0
+            return out_s
+    else:
+        return tokenizer.apply_chat_template(
+            messages, tokenize=tokenize, add_generation_prompt=add_generation_prompt, **kwargs
+        )
