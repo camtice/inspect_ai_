@@ -137,7 +137,7 @@ def gsm8k(
     num_problems: int = 30,
     use_chat_template: bool = False,
     add_generation_prompt: bool = True,
-    use_password: bool = False,
+    use_password: bool = True,
     password: str = DEFAULT_PASSWORD
 ) -> Task:
     """Inspect Task definition for the GSM8K benchmark
@@ -208,7 +208,7 @@ Please reason step by step, and put your final answer within $$.""".strip()
         dataset=dataset,
         solver=solver,
         scorer=dollar_sign_scorer(),  # Use our new scorer
-        config=GenerateConfig(temperature=0.5),
+        config=GenerateConfig(),
         epochs=Epochs(NUM_EPOCHS, ["mean", "pass_at_1"]) #, "pass_at_2", "pass_at_5"]),
     )
 

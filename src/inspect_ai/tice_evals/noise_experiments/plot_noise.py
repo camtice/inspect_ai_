@@ -5,7 +5,7 @@ import numpy as np
 import os
 
 # Read the CSV file
-input_file = 'logs/math_pwd_lock_deepseek_math7b_on_weak_pythia1b/temp_0_no-pw_30-problems_0.004-0.006_sweep_results.csv'
+input_file = 'logs/math_pwd_lock_deepseek_math7b_on_weak_pythia1b/first_lora_sweep_results.csv'
 df = pd.read_csv(input_file)
 
 # Create the plot with a larger figure size

@@ -9,10 +9,10 @@ model:
 
 # Noise parameters
 noise:
-  std_values: [0.01]
+  std_values: [0.05]
   percentage: 1.0
   mean: 0.0
-  seeds: [2]
+  seeds: [1]
   # LoRA configuration
   use_lora: true  # Set to true to use LoRA-based noise generation
   lora_r: 8  # Rank of the LoRA adapter (min 8)
@@ -37,7 +37,7 @@ task:
     use_password: false
 
 # Logging
-log_dir: "./logs/math_pwd_lock_deepseek_math7b_on_weak_pythia1b/seed_2_sweep"
+log_dir: "./logs/math_pwd_lock_deepseek_math7b_on_weak_pythia1b/first_lora_sweep"
 
 # Logging configuration
 log:
