@@ -7,11 +7,15 @@ import gc
 import tempfile
 import time  # Added for timing
 import sys
+import random
+import re
+import warnings
 from dataclasses import dataclass, field
 from queue import Empty, Queue
 from threading import Thread
-from typing import Any, Optional, Literal, Protocol, cast, List, Dict
+from typing import Any, Optional, Literal, Protocol, cast, List, Dict, Tuple, TypeVar
 from collections import defaultdict
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -23,6 +27,7 @@ from transformers import (
     set_seed,
 )
 from typing_extensions import override
+import psutil
 
 # Add imports for PEFT and vLLM
 try:
@@ -65,6 +70,7 @@ class TimerManager:
         self.timings = defaultdict(list)
         self.start_time = None
         self.end_time = None
+        self.gpu_metrics = {}
         
     def reset(self):
         """Reset all timing data."""
@@ -124,14 +130,6 @@ class TimerManager:
         # Extract total generation time if available
         total_time = summary.get("total_generation_time", 0)
         
-        print("\n" + "=" * 70)
-        print(f"PERFORMANCE TIMING SUMMARY")
-        print("=" * 70)
-        
-        if total_time:
-            print(f"Total generation time: {total_time:.4f} seconds")
-            print("-" * 70)
-        
         # Group timings by major categories
         major_categories = {
             "Initialization": ["vLLM model initialization", "Model loading"],
@@ -161,10 +159,8 @@ class TimerManager:
                 # Print each timing in this category
                 for name, data in sorted_items:
                     percent = data.get("percent", 0)
-                    print(f"  {name:<30} {data['total']:.4f}s ({percent:.1f}% of total)")
                     
                 # Print category summary
-                print(f"  {'Category Total:':<30} {category_total:.4f}s ({category_percent:.1f}% of total)")
         
         # Show uncategorized timings
         all_categorized = [item for sublist in major_categories.values() for item in sublist]
@@ -180,7 +176,7 @@ class TimerManager:
                 percent = data.get("percent", 0)
                 print(f"  {name:<30} {data['total']:.4f}s ({percent:.1f}% of total)")
         
-        print("=" * 70 + "\n")
+        print("======================================================================")
 
 
 # Create a global TimerManager instance
@@ -618,7 +614,6 @@ class NoiseHuggingFaceAPI(ModelAPI):
                         continue
                     
                     included_layers[name] = all_linear_layers[name]
-                    # print(f"INCLUDED: {name} - shape {shape}")
                         
                     if module_type not in target_modules:
                         target_modules.append(module_type)
@@ -628,22 +623,10 @@ class NoiseHuggingFaceAPI(ModelAPI):
         included_params = sum(layer["params"] for layer in included_layers.values())
         excluded_params = sum(layer["params"] for layer in excluded_layers.values())
         
-        # print("\n-----------------------------------------------")
-        # print("LINEAR LAYER STATISTICS:")
-        # print("-----------------------------------------------")
-        # print(f"Total linear layers found: {len(all_linear_layers)}")
-        # print(f"Included for LoRA: {len(included_layers)}")
-        # print(f"Excluded from LoRA: {len(excluded_layers)}")
-        # print(f"Total parameters in linear layers: {total_params:,}")
-        # print(f"Parameters in included layers: {included_params:,} ({100*included_params/total_params:.2f}%)")
-        # print(f"Parameters in excluded layers: {excluded_params:,} ({100*excluded_params/total_params:.2f}%)")
-        # print("-----------------------------------------------\n")
-        
         # If no modules found, raise a clear error
         if not target_modules:
             raise ValueError("No linear layers were detected in the model. Cannot auto-detect target modules for LoRA. Go to get_target_modules() to manually specify target modules.")
             
-        # print(f"Auto-detected LoRA target modules: {target_modules}")
         return target_modules
 
     def create_noise_lora_adapter(self):
@@ -664,14 +647,6 @@ class NoiseHuggingFaceAPI(ModelAPI):
             # Define LoRA configuration
             target_modules = self.get_target_modules_properly()  # Improved function
         
-        # print(f"\n-----------------------------------------------")
-        # print(f"LoRA ADAPTER CONFIGURATION:")
-        # print(f"-----------------------------------------------")
-        # print(f"Target modules: {target_modules}")
-        # print(f"LoRA rank: {self.noise_config.lora_r}")
-        # print(f"Mean: {self.noise_config.mean}, Std: {self.noise_config.std}")
-        # print(f"-----------------------------------------------\n")
-        
         with Timer("LoRA config creation"):
             lora_config = LoraConfig(
                 r=self.noise_config.lora_r,
@@ -685,17 +660,6 @@ class NoiseHuggingFaceAPI(ModelAPI):
         # Apply LoRA config to the model
         with Timer("Get PEFT model"):
             peft_model = get_peft_model(self.model, lora_config)
-        
-        # Print summary of original model parameters
-        total_params = sum(p.numel() for p in self.model.parameters())
-        trainable_params = sum(p.numel() for p in peft_model.parameters() if p.requires_grad)
-        # print(f"\n-----------------------------------------------")
-        # print(f"MODEL PARAMETERS SUMMARY:")
-        # print(f"-----------------------------------------------")
-        # print(f"Total parameters in base model: {total_params:,}")
-        # print(f"Trainable parameters in LoRA: {trainable_params:,}")
-        # print(f"LoRA trainable parameters %: {100 * trainable_params / total_params:.2f}%")
-        # print(f"-----------------------------------------------\n")
         
         # Collect layer statistics before injecting noise
         lora_a_shapes = {}
@@ -726,33 +690,7 @@ class NoiseHuggingFaceAPI(ModelAPI):
                             dtype=param.dtype
                         )
                         # Apply noise
-                        # print(f"Applying noise to {name} with shape {param.shape}")
                         param.add_(noise)
-        
-        # Summarize the layers that were modified
-        # print(f"\n-----------------------------------------------")
-        # print(f"LORA ADAPTER STATISTICS:")
-        # print(f"-----------------------------------------------")
-        # print(f"Modified {len(lora_a_shapes) + len(lora_b_shapes)} LoRA parameter tensors")
-        # print(f"Total modules with LoRA: {len(module_types)}")
-        # print(f"Module types: {list(module_types.keys())}")
-        
-        # Show a sample of the shapes for each layer type (A and B)
-        # print(f"\nSample of lora_A shapes (rank × input_dim):")
-        # for i, (name, shape) in enumerate(lora_a_shapes.items()):
-        #     print(f"  {name}: {shape}")
-        #     if i >= 4:  # Show only first 5 examples
-        #         print(f"  ... and {len(lora_a_shapes) - 5} more lora_A layers")
-        #         break
-                
-        # print(f"\nSample of lora_B shapes (output_dim × rank):")
-        # for i, (name, shape) in enumerate(lora_b_shapes.items()):
-        #     print(f"  {name}: {shape}")
-        #     if i >= 4:  # Show only first 5 examples
-        #         print(f"  ... and {len(lora_b_shapes) - 5} more lora_B layers")
-        #         break
-        
-        # print(f"-----------------------------------------------\n")
         
         # Save the adapter
         with Timer("Saving LoRA adapter"):
@@ -1038,7 +976,7 @@ class NoiseHuggingFaceAPI(ModelAPI):
             # End timing for the entire generation process
             timer_manager.end_generation()
             # Print the timing summary
-            timer_manager.print_summary()
+            # timer_manager.print_summary()
 
     def _create_fallback_response(self, input: list[ChatMessage], tools: list[ToolInfo], error_message: str) -> ModelOutput:
         """Create a fallback response when generation fails.
@@ -1244,6 +1182,9 @@ class NoiseHuggingFaceAPI(ModelAPI):
                 
                 print(f"Generating with vLLM using LoRA adapter {adapter_id} at {self.noise_config.lora_adapter_path}")
                 
+                # Print GPU stats before generation
+                # print_gpu_stats("GPU stats before vLLM generation")
+                
                 try:
                     # Use asyncio timeout context manager to prevent hanging
                     timeout_seconds = 120  # 2 minutes timeout
@@ -1263,19 +1204,14 @@ class NoiseHuggingFaceAPI(ModelAPI):
                             )
                         return result
                     
-                    try:
-                        # Use asyncio.wait_for for the timeout
-                        outputs = await asyncio.wait_for(
-                            generate_with_timeout(),
-                            timeout=timeout_seconds
-                        )
-                    except asyncio.TimeoutError:
-                        print(f"vLLM generation timed out after {timeout_seconds} seconds")
-                        raise RuntimeError(f"Generation timed out after {timeout_seconds} seconds")
-                    except asyncio.CancelledError:
-                        print("vLLM generation was cancelled")
-                        # Re-raise to propagate cancellation
-                        raise
+                    # Use asyncio.wait_for for the timeout
+                    outputs = await asyncio.wait_for(
+                        generate_with_timeout(),
+                        timeout=timeout_seconds
+                    )
+                    
+                    # Print GPU stats after generation
+                    # print_gpu_stats("GPU stats after vLLM generation")
                     
                     # Check if outputs is valid
                     if not outputs or len(outputs) == 0 or not hasattr(outputs[0], 'outputs') or len(outputs[0].outputs) == 0:
@@ -1287,9 +1223,7 @@ class NoiseHuggingFaceAPI(ModelAPI):
                     
                     if not generated_text or len(generated_text.strip()) == 0:
                         print("vLLM generated empty text")
-                        # Fall back to a default message if generation fails
-                        generated_text = "I apologize, but I was unable to generate a response."
-                    
+                        raise RuntimeError("vLLM generated empty text")
                     # Create a wrapper object with output attribute for consistency
                     wrapped_output = GenerateVLLMOutput(output=generated_text)
                     
@@ -1320,9 +1254,9 @@ class NoiseHuggingFaceAPI(ModelAPI):
                     print(f"Error during vLLM generation: {str(e)}")
                     # We still want to raise the error for proper handling
                     raise
-            
-            # This should not be reached with the current implementation
-            raise ValueError("vLLM model initialized but LoRA not enabled - this is an unexpected state")
+            else:
+                # This should not be reached with the current implementation
+                raise ValueError("vLLM model initialized but LoRA not enabled - this is an unexpected state")
 
         except asyncio.CancelledError:
             print("vLLM generation task was cancelled")
@@ -1331,10 +1265,9 @@ class NoiseHuggingFaceAPI(ModelAPI):
         except Exception as e:
             print(f"Unexpected error in vLLM generation: {type(e).__name__}: {str(e)}")
             raise
-        finally:
-            # We don't need to move model back to CPU or clear cache here since vLLM manages memory
-            # We also don't explicitly clear the adapter since we want to reuse it if possible
-            pass
+        # finally:
+            # Final GPU stats
+            # print_gpu_stats("Final GPU stats after vLLM generation")
 
     async def _generate_hf(
         self,
@@ -1759,3 +1692,42 @@ def tokenizer_apply_chat(tokenizer, messages, tokenize=True, add_generation_prom
 class GenerateVLLMOutput:
     """Wrapper class for vLLM generation output to provide consistent interface."""
     output: str
+
+
+# Simple GPU monitoring utility - using only PyTorch built-in functions
+def get_gpu_stats():
+    """Get current GPU memory usage statistics using only PyTorch built-in functions."""
+    if not torch.cuda.is_available():
+        return "GPU not available"
+    
+    stats = []
+    for i in range(torch.cuda.device_count()):
+        total_memory = torch.cuda.get_device_properties(i).total_memory / (1024 ** 2)  # MB
+        reserved_memory = torch.cuda.memory_reserved(i) / (1024 ** 2)  # MB
+        allocated_memory = torch.cuda.memory_allocated(i) / (1024 ** 2)  # MB
+        free_memory = total_memory - reserved_memory
+        
+        stats.append({
+            "device": i,
+            "total_memory_mb": round(total_memory, 1),
+            "reserved_memory_mb": round(reserved_memory, 1),
+            "allocated_memory_mb": round(allocated_memory, 1),
+            "free_memory_mb": round(free_memory, 1),
+        })
+    
+    return stats
+
+def print_gpu_stats(label="Current GPU stats"):
+    """Print current GPU memory usage with a label."""
+    stats = get_gpu_stats()
+    if isinstance(stats, str):
+        print(f"{label}: {stats}")
+        return
+    
+    print(f"\n{label}:")
+    print("-" * 80)
+    for gpu in stats:
+        print(f"GPU {gpu['device']}:")
+        print(f"  Memory: {gpu['allocated_memory_mb']:.1f}MB / {gpu['total_memory_mb']:.1f}MB allocated")
+        print(f"  Reserved: {gpu['reserved_memory_mb']:.1f}MB (Free: {gpu['free_memory_mb']:.1f}MB)")
+    print("-" * 80)
