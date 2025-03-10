@@ -329,6 +329,10 @@ class NoiseHuggingFaceAPI(ModelAPI):
         # Get tokenizer path or default to model path
         self.tokenizer_path = model_args.pop("tokenizer_path", model_path)
         
+        # Simplify: Just use the constructor parameter directly
+        self.seed = seed
+        print(f"Using seed value: {self.seed} (from constructor)")
+        
         # Initialize parent class with only the parameters it accepts
         super().__init__(
             model_name=model_path,
@@ -339,7 +343,6 @@ class NoiseHuggingFaceAPI(ModelAPI):
 
         # Set up model and device configuration
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.seed = seed
         
         # If API key wasn't passed, try to get it from environment variable
         if self.api_key is None:
@@ -380,7 +383,7 @@ class NoiseHuggingFaceAPI(ModelAPI):
             mean=model_args.pop("noise_mean", 0.0),
             percentage=model_args.pop("noise_percentage", 1.0),
             std=noise_std,
-            seed=seed,
+            seed=self.seed,  # Use the constructor seed
             use_lora=self.use_lora,
             lora_r=lora_r,
             target_modules=lora_target_modules,
@@ -404,9 +407,11 @@ class NoiseHuggingFaceAPI(ModelAPI):
         # Store model loading args for reloading
         self.model_args = model_args
 
-        # Set random seeds
-        if model_args.get("seed", None) is not None:
-            set_random_seeds(model_args["seed"])
+        # Set random seeds - Simplified
+        try:
+            set_random_seeds(self.seed)
+        except Exception as e:
+            print(f"WARNING: Error setting random seeds with value {self.seed}: {str(e)}")
 
         # Collect known model_args (then delete them so we can pass the rest on)
         def collect_model_arg(name: str) -> Any | None:
@@ -739,6 +744,7 @@ class NoiseHuggingFaceAPI(ModelAPI):
                         max_lora_rank=self.noise_config.lora_r,
                         trust_remote_code=True,
                         enable_lora=True,  # Enable LoRA support
+                        seed=42
                     )
             except Exception as e:
                 error_msg = f"Error initializing vLLM model: {e}"

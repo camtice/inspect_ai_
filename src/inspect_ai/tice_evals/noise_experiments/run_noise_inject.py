@@ -9,6 +9,7 @@ import subprocess
 import sys
 from tqdm import tqdm
 import json
+import shutil
 
 def clear_gpu_memory():
     """Helper function to aggressively clear GPU memory"""
@@ -122,7 +123,8 @@ def run_single_eval(config, task_path, std, seed):
     model_args_str = model_args_str.replace('true', 'True').replace('false', 'False')
     
     # Create a specialized log directory based on parameters for better organization
-    log_subdir = f"{config['log_dir']}/{Path(model_path).name}/seed_{seed}_sweep"
+    # Remove the duplicate model name from the log path
+    log_subdir = f"{config['log_dir']}/seed_{seed}_sweep"
     os.makedirs(log_subdir, exist_ok=True)
     
     # Get task args and force use_chat_template to False
@@ -165,6 +167,7 @@ eval(
     temperature={config['model']['temperature']},
     model_args={model_args_str},
     task_config={task_args_str},
+    seed=42,
     log_format="json"
 )
 print("Evaluation completed")
@@ -200,7 +203,26 @@ def main(config_path: str = "configs/default.yaml"):
     
     # Set up logging
     log_dir = config['log_dir']
+    
+    # Check if log directory exists and contains results
+    if os.path.exists(log_dir):
+        # Check if there are any files in the directory
+        if any(os.scandir(log_dir)):
+            print(f"\nWARNING: Log directory '{log_dir}' already exists and contains files.")
+            print("Running the experiment may overwrite or mix results with existing data.")
+            confirmation = input("Are you sure you want to proceed? Type 'yes' to continue: ")
+            if confirmation.lower() != 'yes':
+                print("Experiment aborted.")
+                return
+    
+    # Create log directory if it doesn't exist
     os.makedirs(log_dir, exist_ok=True)
+    
+    # Save a copy of the configuration file to the log directory
+    config_filename = os.path.basename(config_path)
+    config_dest = os.path.join(log_dir, f"run_config_{config_filename}")
+    shutil.copy2(config_path, config_dest)
+    print(f"Configuration saved to: {config_dest}")
 
     # Get seeds from config, default to [None] if not specified
     seeds = config['noise'].get('seeds', [None])

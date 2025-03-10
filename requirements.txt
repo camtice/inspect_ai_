@@ -14,6 +14,7 @@ jsonschema>3.1.1
 mmh3>3.1.0
 nest_asyncio
 numpy
+peft
 platformdirs>=2.3.0
 psutil
 pydantic>=2
@@ -26,15 +27,6 @@ shortuuid
 tenacity
 textual>=0.86.2,<=1.0.0
 typing_extensions>=4.9.0
+vllm
 zipp>=3.19.1 # not directly required, pinned by Snyk to avoid a vulnerability
 
-# for noise inject
-torch
-accelerate
-vllm
-peft
-datasets
-
-# for plotting
-matplotlib
-seaborn

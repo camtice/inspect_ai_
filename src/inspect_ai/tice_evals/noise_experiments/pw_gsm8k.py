@@ -137,7 +137,7 @@ def gsm8k(
     num_problems: int = 30,
     use_chat_template: bool = False,
     add_generation_prompt: bool = True,
-    use_password: bool = True,
+    use_password: bool = False,
     password: str = DEFAULT_PASSWORD
 ) -> Task:
     """Inspect Task definition for the GSM8K benchmark
