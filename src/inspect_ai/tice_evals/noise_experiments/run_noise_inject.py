@@ -73,7 +73,7 @@ def run_single_eval(config, task_path, std, seed):
     lora_target_modules = config['noise'].get('lora_target_modules', None)
     
     # Get model path and tokenizer path
-    model_path = config['noise'].get('model_path', "redwoodresearch/math_pwd_lock_deepseek_math7b_on_weak_pythia1b")
+    model_path = config['model'].get('model_path')
     
     # Get tokenizer path from config, with proper fallbacks
     # 1. First check if tokenizer_path is defined in model config
@@ -107,7 +107,8 @@ def run_single_eval(config, task_path, std, seed):
         'noise_percentage': config['noise'].get('percentage', 1.0),
         'seed': seed,
         'use_lora': use_lora,
-        'lora_r': lora_r
+        'lora_r': lora_r,
+        'max_model_len': config['model'].get('max_model_len')
     }
     
     # Add target modules if specified

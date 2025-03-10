@@ -325,7 +325,9 @@ class NoiseHuggingFaceAPI(ModelAPI):
 
         # Store model_path to use for loading the model
         self.model_path = model_path
-        
+
+        self.max_model_len = model_args.pop("max_model_len")
+
         # Get tokenizer path or default to model path
         self.tokenizer_path = model_args.pop("tokenizer_path", model_path)
         
@@ -426,11 +428,20 @@ class NoiseHuggingFaceAPI(ModelAPI):
         model_path = collect_model_arg("model_path")  # Collect model_path first
         if model_path:  # Only assign if not None
             self.model_path = model_path  # Then assign it to self
+        max_model_len = collect_model_arg("max_model_len")
+        if max_model_len:
+            self.max_model_len = max_model_len
         tokenizer_path = collect_model_arg("tokenizer_path")
         if tokenizer_path:  # Only assign if not None
             self.tokenizer_path = tokenizer_path
         self.batch_size = collect_model_arg("batch_size")
         self.chat_template = collect_model_arg("chat_template")
+        
+        # Add max_model_len collection here
+        self.max_model_len = collect_model_arg("max_model_len")
+        if isinstance(self.max_model_len, str):
+            self.max_model_len = int(self.max_model_len)
+        
         self.tokenizer_call_args = collect_model_arg("tokenizer_call_args")
         if self.tokenizer_call_args is None:
             self.tokenizer_call_args = {}
@@ -549,31 +560,6 @@ class NoiseHuggingFaceAPI(ModelAPI):
         # Reset noise flag
         self.noise_config.is_noisy = False
 
-    def get_target_modules(self):
-        """Get target modules for LoRA adaptation.
-        
-        If custom target modules are specified in the config, use those.
-        Otherwise, detect all linear layers in the model.
-        """
-        # Check if custom target modules are specified
-        if hasattr(self.noise_config, 'target_modules') and self.noise_config.target_modules:
-            print(f"Using custom target modules: {self.noise_config.target_modules}")
-            return self.noise_config.target_modules
-        
-        # Detect all linear layers
-        import re
-        model_modules = str(self.model.modules)
-        pattern = r'\((\w+)\): Linear'
-        linear_layer_names = re.findall(pattern, model_modules)
-
-        names = []
-        for name in linear_layer_names:
-            names.append(name)
-        
-        target_modules = list(set(names))
-        print(f"Detected {len(target_modules)} linear layers for LoRA adaptation")
-        return target_modules
-
     def get_target_modules_properly(self):
         """
         Determine the target modules for LoRA based on model architecture.
@@ -627,6 +613,11 @@ class NoiseHuggingFaceAPI(ModelAPI):
         total_params = sum(layer["params"] for layer in all_linear_layers.values())
         included_params = sum(layer["params"] for layer in included_layers.values())
         excluded_params = sum(layer["params"] for layer in excluded_layers.values())
+
+        print(f"Target modules: {target_modules}")
+        print(f"Total params: {total_params}")
+        print(f"Included params: {included_params}")
+        print(f"Excluded params: {excluded_params}")
         
         # If no modules found, raise a clear error
         if not target_modules:
@@ -736,6 +727,12 @@ class NoiseHuggingFaceAPI(ModelAPI):
                     os.environ["HF_TOKEN"] = self.api_key
                 
                 with Timer("vLLM model initialization"):
+                    # Add warning for large context windows
+                    if self.max_model_len and self.max_model_len > 10000:
+                        print(f"WARNING: Using max_model_len={self.max_model_len} which is >10k tokens. vLLM may have issues with very large context windows depending on your GPU memory and model size.")
+                    
+                    print(f"max_model_len: {self.max_model_len}")
+
                     # Initialize vLLM model with enable_lora=True to support multi-LoRA
                     self.vllm_model = LLM(
                         model=self.model_path,
@@ -744,7 +741,8 @@ class NoiseHuggingFaceAPI(ModelAPI):
                         max_lora_rank=self.noise_config.lora_r,
                         trust_remote_code=True,
                         enable_lora=True,  # Enable LoRA support
-                        seed=42
+                        seed=42,
+                        max_model_len=self.max_model_len
                     )
             except Exception as e:
                 error_msg = f"Error initializing vLLM model: {e}"
