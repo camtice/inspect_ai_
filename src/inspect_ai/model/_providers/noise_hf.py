@@ -325,17 +325,36 @@ class NoiseHuggingFaceAPI(ModelAPI):
 
         # Store model_path to use for loading the model
         self.model_path = model_path
-
-        self.max_model_len = model_args.pop("max_model_len")
-
-        # Get tokenizer path or default to model path
-        self.tokenizer_path = model_args.pop("tokenizer_path", model_path)
         
-        # Simplify: Just use the constructor parameter directly
+        # Store seed
         self.seed = seed
         print(f"Using seed value: {self.seed} (from constructor)")
+
+        # Collect and process all model arguments upfront
+        def collect_model_arg(name: str) -> Any | None:
+            nonlocal model_args
+            value = model_args.pop(name, None)
+            return value
+
+        # Initialize base configuration
+        self.device = collect_model_arg("device")
+        self.tokenizer_path = collect_model_arg("tokenizer_path") or model_path
+        self.batch_size = collect_model_arg("batch_size")
+        self.chat_template = collect_model_arg("chat_template")
         
-        # Initialize parent class with only the parameters it accepts
+        self.tokenizer_call_args = collect_model_arg("tokenizer_call_args") or {}
+
+        # Store remaining model args for model initialization
+        self.base_model_kwargs = {
+            "torch_dtype": torch.bfloat16,
+            "low_cpu_mem_usage": True,
+        }
+        
+        # Add remaining kwargs to base_model_kwargs
+        for key, value in model_args.items():
+            self.base_model_kwargs[key] = value
+
+        # Initialize parent class
         super().__init__(
             model_name=model_path,
             base_url=base_url,
@@ -343,20 +362,20 @@ class NoiseHuggingFaceAPI(ModelAPI):
             config=config
         )
 
-        # Set up model and device configuration
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        
         # If API key wasn't passed, try to get it from environment variable
         if self.api_key is None:
             self.api_key = os.environ.get(HF_TOKEN)
             if self.api_key is None:
                 print("Warning: HF_TOKEN environment variable not set. Some models may not be accessible.")
-        
+
         # Get noise parameters
-        noise_std = model_args.pop("noise_std", std)  # Use noise_std if provided, otherwise use std
-        
+        noise_std = model_args.pop("noise_std", None)  # Use noise_std if provided, otherwise use std
+        if noise_std is None:
+            raise ValueError("noise_std parameter is required. Set it to a float value explicitly.")
+
         # Extract LoRA parameters
         use_lora = model_args.pop("use_lora", None)
+        print(f"results from use_lora right after pop: {use_lora}")
         # Handle both string and boolean values for use_lora
         if isinstance(use_lora, str):
             self.use_lora = use_lora.lower() == "true"
@@ -390,12 +409,25 @@ class NoiseHuggingFaceAPI(ModelAPI):
             lora_r=lora_r,
             target_modules=lora_target_modules,
         )
-        
+
+        # Set up device configuration
+        if not self.device:
+            if torch.backends.mps.is_available():
+                self.device = "mps"
+            elif torch.cuda.is_available():
+                self.device = "cuda:0"
+            else:
+                self.device = "cpu"
+
+        # Add API token to base kwargs if available
+        if self.api_key is not None:
+            self.base_model_kwargs["use_auth_token"] = self.api_key
+
         # Initialize model and tokenizer
         self.model = None
         self.tokenizer = None
         self.vllm_model = None
-        self.temp_dir = None  # Add this line to initialize temp_dir
+        self.temp_dir = None
         
         # Load the model and tokenizer
         self.load_model_and_tokenizer()
@@ -428,19 +460,11 @@ class NoiseHuggingFaceAPI(ModelAPI):
         model_path = collect_model_arg("model_path")  # Collect model_path first
         if model_path:  # Only assign if not None
             self.model_path = model_path  # Then assign it to self
-        max_model_len = collect_model_arg("max_model_len")
-        if max_model_len:
-            self.max_model_len = max_model_len
         tokenizer_path = collect_model_arg("tokenizer_path")
         if tokenizer_path:  # Only assign if not None
             self.tokenizer_path = tokenizer_path
         self.batch_size = collect_model_arg("batch_size")
         self.chat_template = collect_model_arg("chat_template")
-        
-        # Add max_model_len collection here
-        self.max_model_len = collect_model_arg("max_model_len")
-        if isinstance(self.max_model_len, str):
-            self.max_model_len = int(self.max_model_len)
         
         self.tokenizer_call_args = collect_model_arg("tokenizer_call_args")
         if self.tokenizer_call_args is None:
@@ -460,21 +484,11 @@ class NoiseHuggingFaceAPI(ModelAPI):
         model_kwargs = {
             "device_map": "cpu",  # Load to CPU first
             "low_cpu_mem_usage": True,
-            **model_args,
         }
         
         # Only add auth token if it's available
         if self.api_key is not None:
             model_kwargs["use_auth_token"] = self.api_key
-            
-        if self.model_path:
-            self.model = AutoModelForCausalLM.from_pretrained(
-                self.model_path,
-                **model_kwargs
-            )
-        else:
-            # If model_path is None, raise a more descriptive error
-            raise ValueError("Model path is not defined. Please provide a valid model_path.")
 
         # Keep model on CPU to save GPU memory, we'll move to GPU only when needed
         # self.model = self.model.to(self.device)  # Don't move to GPU yet
@@ -501,6 +515,8 @@ class NoiseHuggingFaceAPI(ModelAPI):
             raise ValueError("noise_percentage must be between 0.0 and 1.0")
         if self.noise_config.std < 0.0:
             raise ValueError("noise_std must be non-negative")
+
+        print(f"Debug: use_lora={self.use_lora}, attempting to load model in constructor")
 
     def __del__(self):
         """Clean up resources when the object is deleted."""
@@ -627,81 +643,50 @@ class NoiseHuggingFaceAPI(ModelAPI):
 
     def create_noise_lora_adapter(self):
         """Create a LoRA adapter with random noise using PEFT."""
-        from peft import LoraConfig, get_peft_model
-        
-        # Set seed if configured
-        if self.noise_config.seed is not None:
-            self.set_seed(self.noise_config.seed)
-            print(f"Using seed {self.noise_config.seed} for noise generation")
-        
-        # Create a persistent directory to store the adapter
-        adapter_name = f"noise_adapter_{self.noise_config.seed}"
-        adapter_dir = os.path.join("./lora_adapters", adapter_name)
-        os.makedirs(adapter_dir, exist_ok=True)
-        
-        with Timer("Get target modules"):
-            # Define LoRA configuration
-            target_modules = self.get_target_modules_properly()  # Improved function
-        
-        with Timer("LoRA config creation"):
-            lora_config = LoraConfig(
-                r=self.noise_config.lora_r,
-                lora_alpha=self.noise_config.lora_r,  # Usually set to same as r
-                target_modules=target_modules,
-                lora_dropout=0.0,
-                bias="none",
-                task_type="CAUSAL_LM"
-            )
-        
-        # Apply LoRA config to the model
-        with Timer("Get PEFT model"):
-            peft_model = get_peft_model(self.model, lora_config)
-        
-        # Collect layer statistics before injecting noise
-        lora_a_shapes = {}
-        lora_b_shapes = {}
-        module_types = {}
-        
-        # Inject noise directly into the LoRA weights
-        with Timer("Injecting noise into LoRA weights"):
-            with torch.no_grad():
-                for name, param in peft_model.named_parameters():
-                    # Only modify LoRA adapter weights (lora_A and lora_B)
-                    if 'lora_A' in name or 'lora_B' in name:
-                        # Track statistics about layers
-                        module_name = name.split('.')[0]
-                        module_types[module_name] = module_name
-                        
-                        if 'lora_A' in name:
-                            lora_a_shapes[name] = param.shape
-                        elif 'lora_B' in name:
-                            lora_b_shapes[name] = param.shape
-                        
-                        # Generate noise
-                        noise = torch.normal(
-                            mean=self.noise_config.mean,
-                            std=self.noise_config.std,
-                            size=param.shape,
-                            device=param.device,
-                            dtype=param.dtype
-                        )
-                        # Apply noise
-                        param.add_(noise)
-        
-        # Save the adapter
-        with Timer("Saving LoRA adapter"):
-            peft_model.save_pretrained(adapter_dir)
-        
-        # Store the adapter path
-        self.noise_config.lora_adapter_path = adapter_dir
-        self.noise_config.is_noisy = True
-        
-        # Clean up
-        del peft_model
-        # Use selective garbage collection
-        self.gc_manager.collect()
-        
-        return adapter_dir
+        try:
+            # Temporarily load the model
+            temp_model = self.load_temp_model_for_lora()
+            
+            # Create adapter directory
+            adapter_name = f"noise_adapter_{self.noise_config.seed}"
+            adapter_dir = os.path.join("./lora_adapters", adapter_name)
+            os.makedirs(adapter_dir, exist_ok=True)
+            
+            # Create LoRA config and inject noise
+            with Timer("LoRA setup and noise injection"):
+                lora_config = LoraConfig(
+                    r=self.noise_config.lora_r,
+                    lora_alpha=self.noise_config.lora_r,
+                    target_modules=self.get_target_modules_properly(),
+                    lora_dropout=0.0,
+                    bias="none",
+                    task_type="CAUSAL_LM"
+                )
+                
+                peft_model = get_peft_model(temp_model, lora_config)
+                
+                # Inject noise into LoRA weights
+                with torch.no_grad():
+                    for name, param in peft_model.named_parameters():
+                        if 'lora_A' in name or 'lora_B' in name:
+                            noise = torch.normal(
+                                mean=self.noise_config.mean,
+                                std=self.noise_config.std,
+                                size=param.shape,
+                                device=param.device,
+                                dtype=param.dtype
+                            )
+                            param.add_(noise)
+            
+                # Save the adapter
+                peft_model.save_pretrained(adapter_dir)
+            
+            return adapter_dir
+            
+        finally:
+            # Clean up temporary model
+            del temp_model
+            self.gc_manager.collect(force=True)
     
     def initialize_vllm(self):
         """Initialize vLLM model for LoRA-based inference."""
@@ -728,10 +713,10 @@ class NoiseHuggingFaceAPI(ModelAPI):
                 
                 with Timer("vLLM model initialization"):
                     # Add warning for large context windows
-                    if self.max_model_len and self.max_model_len > 10000:
-                        print(f"WARNING: Using max_model_len={self.max_model_len} which is >10k tokens. vLLM may have issues with very large context windows depending on your GPU memory and model size.")
+                    # if self.max_model_len and self.max_model_len > 10000:
+                    #     print(f"WARNING: Using max_model_len={self.max_model_len} which is >10k tokens. vLLM may have issues with very large context windows depending on your GPU memory and model size.")
                     
-                    print(f"max_model_len: {self.max_model_len}")
+                    # print(f"max_model_len: {self.max_model_len}")
 
                     # Initialize vLLM model with enable_lora=True to support multi-LoRA
                     self.vllm_model = LLM(
@@ -742,7 +727,7 @@ class NoiseHuggingFaceAPI(ModelAPI):
                         trust_remote_code=True,
                         enable_lora=True,  # Enable LoRA support
                         seed=42,
-                        max_model_len=self.max_model_len
+                        max_model_len=2048  # Increase from 800 to a more typical value
                     )
             except Exception as e:
                 error_msg = f"Error initializing vLLM model: {e}"
@@ -894,9 +879,9 @@ class NoiseHuggingFaceAPI(ModelAPI):
                     if not VLLM_AVAILABLE:
                         raise ImportError("vLLM and PEFT are required for LoRA-based noise generation")
                     
-                    # Initialize vLLM model first if not already initialized
-                    if self.vllm_model is None:
-                        self.initialize_vllm()
+                    # # Initialize vLLM model first if not already initialized
+                    # if self.vllm_model is None:
+                    #     self.initialize_vllm()
                     
                     # Create noise LoRA adapter
                     adapter_path = self.create_noise_lora_adapter()
@@ -1061,49 +1046,69 @@ class NoiseHuggingFaceAPI(ModelAPI):
         # return
         return cast(str, chat)
 
+    def get_model_kwargs(self, for_vllm: bool = False, device_map: str = "auto") -> dict:
+        """Get model initialization kwargs based on context.
+        
+        Args:
+            for_vllm: Whether the kwargs are for vLLM initialization
+            device_map: Device mapping strategy
+            
+        Returns:
+            Dictionary of model initialization arguments
+        """
+        kwargs = self.base_model_kwargs.copy()
+        kwargs["device_map"] = device_map
+
+            
+        return kwargs
+
     def load_model_and_tokenizer(self):
-        """Load the model and tokenizer."""
-        print(f"Loading model from {self.model_path}")
+        """Load tokenizer and optionally the model."""
         print(f"Loading tokenizer from {self.tokenizer_path}")
+        self.load_tokenizer()
         
-        # Load tokenizer from the specified path
-        tokenizer_kwargs = {
-            "use_fast": True,
-            "padding_side": "left",
-        }
-        
-        # Only add auth token if it's available
-        if self.api_key is not None:
-            tokenizer_kwargs["use_auth_token"] = self.api_key
-            
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            self.tokenizer_path,
-            **tokenizer_kwargs
-        )
-        
-        # Set pad token if not set
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
-        
-        # Load model based on noise injection method
         if not self.use_lora:
+            print(f"Loading model from {self.model_path}")
             # For traditional noise injection, load model directly
-            model_kwargs = {
-                "torch_dtype": torch.bfloat16,
-                "device_map": "auto",  # Use auto device mapping for efficient memory usage
-            }
+            model_kwargs = self.get_model_kwargs(for_vllm=False)
             
-            # Only add auth token if it's available
-            if self.api_key is not None:
-                model_kwargs["use_auth_token"] = self.api_key
-                
             self.model = AutoModelForCausalLM.from_pretrained(
                 self.model_path,
                 **model_kwargs
             )
         else:
-            # For LoRA, initialize vLLM model with proper configurations
+            # For LoRA, initialize vLLM model
             self.initialize_vllm()
+
+    def load_tokenizer(self):
+        """Load only the tokenizer."""
+        tokenizer_kwargs = {
+            "use_fast": True,
+            "padding_side": "left",
+        }
+        
+        if self.api_key is not None:
+            tokenizer_kwargs["use_auth_token"] = self.api_key
+        
+        if self.tokenizer_path:
+            self.tokenizer = AutoTokenizer.from_pretrained(self.tokenizer_path, **tokenizer_kwargs)
+        else:
+            self.tokenizer = AutoTokenizer.from_pretrained(self.model_path, **tokenizer_kwargs)
+        
+        # Set pad token if not set
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+        self.tokenizer.padding_side = "left"
+
+    def load_temp_model_for_lora(self):
+        """Temporarily load the model for LoRA adapter creation."""
+        print("Temporarily loading model for LoRA adapter creation")
+        model_kwargs = self.get_model_kwargs(for_vllm=False, device_map="cpu")
+        
+        return AutoModelForCausalLM.from_pretrained(
+            self.model_path,
+            **model_kwargs
+        )
 
     def generate_noise(self, parameter, noise_config=None):
         """Generate noise based on the noise configuration.

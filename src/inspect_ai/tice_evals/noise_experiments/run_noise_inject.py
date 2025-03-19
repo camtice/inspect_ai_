@@ -61,7 +61,7 @@ def run_single_eval(config, task_path, std, seed):
     print(f"  Seed: {seed}")
     
     # Get LoRA configuration
-    use_lora = config['noise'].get('use_lora', False)
+    use_lora = config['noise'].get('use_lora')
     lora_r = config['noise'].get('lora_r', 8)
     
     # Validate LoRA rank for vLLM compatibility
@@ -108,7 +108,6 @@ def run_single_eval(config, task_path, std, seed):
         'seed': seed,
         'use_lora': use_lora,
         'lora_r': lora_r,
-        'max_model_len': config['model'].get('max_model_len')
     }
     
     # Add target modules if specified
@@ -147,16 +146,11 @@ import warnings
 import transformers
 from inspect_ai import eval
 
-warnings.filterwarnings('ignore')
-transformers.logging.set_verbosity_error()
-
 # Debug settings
 os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 os.environ["TORCH_USE_CUDA_DSA"] = "1"
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512"
 os.environ["INSPECT_LOG_DIR"] = "{log_subdir}"
-os.environ["TRANSFORMERS_VERBOSITY"] = "error"
-os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "1"
 os.environ["TRANSFORMERS_OFFLINE"] = "0"  # Allow online mode to download models if needed
 
 print("Starting evaluation with {'LoRA-based' if use_lora else 'traditional'} noise generation")
@@ -180,8 +174,35 @@ print("Evaluation completed")
         # First ensure GPU memory is clear
         clear_gpu_memory()
         
-        # Run the command
-        subprocess.run(cmd, check=True)
+        # Run the command with explicit output capture and real-time printing
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,  # Line buffered
+            universal_newlines=True
+        )
+        
+        # Print output in real-time
+        while True:
+            stdout_line = process.stdout.readline()
+            stderr_line = process.stderr.readline()
+            
+            if stdout_line == '' and stderr_line == '' and process.poll() is not None:
+                break
+            
+            if stdout_line:
+                print(stdout_line.rstrip())
+            if stderr_line:
+                print(stderr_line.rstrip(), file=sys.stderr)
+            
+        # Get the return code
+        return_code = process.poll()
+        
+        if return_code != 0:
+            print(f"Command failed with return code {return_code}")
+            return False
         
         # Successful completion - allow a moment for processes to properly exit
         time.sleep(1)
@@ -190,7 +211,7 @@ print("Evaluation completed")
         clear_gpu_memory()
         
         return True
-    except subprocess.CalledProcessError as e:
+    except Exception as e:
         print(f"Error running evaluation: {e}")
         # Force more aggressive cleanup in case of errors
         clear_gpu_memory()
