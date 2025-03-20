@@ -719,18 +719,18 @@ class NoiseHuggingFaceAPI(ModelAPI):
                     # print(f"max_model_len: {self.max_model_len}")
 
                     # Initialize vLLM model with enable_lora=True to support multi-LoRA
-                    self.vllm_model = LLM(
-                        model=self.model_path,
-                        tokenizer=self.tokenizer_path,
-                        tensor_parallel_size=1,
-                        max_lora_rank=self.noise_config.lora_r,
-                        trust_remote_code=True,
-                        enable_lora=True,  # Enable LoRA support
-                        seed=42,
-                        max_model_len=2048  # Increase from 800 to a more typical value
-                    )
+                    # self.vllm_model = LLM(
+                    #     model=self.model_path,
+                    #     tokenizer=self.tokenizer_path,
+                    #     tensor_parallel_size=1,
+                    #     max_lora_rank=self.noise_config.lora_r,
+                    #     trust_remote_code=True,
+                    #     enable_lora=True,  # Enable LoRA support
+                    #     seed=42,
+                    #     max_model_len=2048
+                    # )
             except Exception as e:
-                error_msg = f"Error initializing vLLM model: {e}"
+                error_msg = f"Error initializing model in initialize_vllm() vLLM model: {e}"
                 print(error_msg)
                 raise RuntimeError(error_msg) from e
     

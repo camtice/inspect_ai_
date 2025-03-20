@@ -5,7 +5,7 @@ model:
   do_sample: false
   temperature: 1
   model_path: "meta-llama/Llama-3.1-8B-Instruct"
-  tokenizer_path: "meta-llama/Llama-3.1-8B-Instruct" # "deepseek-ai/deepseek-math-7b-base"  # Separate tokenizer path
+  tokenizer_path: "meta-llama/Llama-3.1-8B-Instruct" # "deepseek-ai/deepseek-math-7b-base"  # Separate tokenizer path # defaults model_path if empty
   # max_model_len: 1024  # Maximum model context length for vLLM
 
 # abliterated model: "noise_hf/failspy/Meta-Llama-3-8B-Instruct-abliterated-v3"
@@ -19,12 +19,12 @@ noise:
   use_lora: true  # Set to true to use LoRA-based noise generation
   lora_r: 8  # Rank of the LoRA adapter (min 8)
   # Advanced LoRA options
-  lora_target_modules: null  # Set to null to target all linear layers, or specify a list of module names
+  lora_target_modules: null  #NOT VERIFIED # Set to null to target all linear layers, or specify a list of module names
 
 
 # List of task scripts to run
 tasks:
-  - "evil_arc_challenge.py"
+  - "pw_gsm8k.py"
 
 # Task configuration (added manually for tracking)
 task:

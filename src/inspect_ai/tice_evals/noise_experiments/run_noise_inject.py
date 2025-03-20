@@ -75,12 +75,8 @@ def run_single_eval(config, task_path, std, seed):
     # Get model path and tokenizer path
     model_path = config['model'].get('model_path')
     
-    # Get tokenizer path from config, with proper fallbacks
-    # 1. First check if tokenizer_path is defined in model config
-    # 2. Then check if tokenizer_path is defined in noise config
-    # 3. Finally, default to model_path if neither is specified
-    tokenizer_path = config['model'].get('tokenizer_path', 
-                    config['noise'].get('tokenizer_path', model_path))
+    # Get tokenizer path and default to model_path
+    tokenizer_path = config['model'].get('tokenizer_path', model_path)
     
     print(f"  Use LoRA: {use_lora}")
     if use_lora:
@@ -103,8 +99,8 @@ def run_single_eval(config, task_path, std, seed):
         'model_path': model_path,
         'tokenizer_path': tokenizer_path,
         'noise_std': std,
-        'noise_mean': config['noise'].get('mean', 0.0),
-        'noise_percentage': config['noise'].get('percentage', 1.0),
+        'noise_mean': config['noise']['mean'],
+        'noise_percentage': config['noise']['percentage'],
         'seed': seed,
         'use_lora': use_lora,
         'lora_r': lora_r,
@@ -246,8 +242,17 @@ def main(config_path: str = "configs/default.yaml"):
     shutil.copy2(config_path, config_dest)
     print(f"Configuration saved to: {config_dest}")
 
-    # Get seeds from config, default to [None] if not specified
-    seeds = config['noise'].get('seeds', [None])
+    # Validate seeds - throw an error if seeds are not present or not in the right format
+    if 'noise' not in config:
+        raise ValueError("Missing 'noise' section in the configuration file")
+        
+    seeds = config['noise'].get('seeds')
+    
+    if seeds is None:
+        raise ValueError("Missing 'seeds' in noise configuration. Seeds must be explicitly specified.")
+    
+    if not isinstance(seeds, list) or len(seeds) == 0:
+        raise ValueError(f"Seeds must be a non-empty list, got: {seeds}")
     
     # Get list of tasks to run
     tasks = config['tasks']
@@ -273,7 +278,7 @@ def main(config_path: str = "configs/default.yaml"):
                         print(f"Error during evaluation of {task_path} with std={std}, seed={seed}: {str(e)}")
                     
                     # Add a small delay between runs to allow for resource cleanup
-                    time.sleep(2)
+                    time.sleep(1)
                     
                     # Clear GPU memory between runs
                     clear_gpu_memory()
