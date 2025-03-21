@@ -42,14 +42,13 @@ def get_task_args(task_path: str, config: dict) -> dict:
     
     if task_base_name == 'pw_gsm8k':
         return {
-            'fewshot': task_config.get('fewshot', 0),
-            'fewshot_seed': task_config.get('fewshot_seed', 42),
-            'num_problems': task_config.get('num_problems', 3),
-            'use_chat_template': task_config.get('use_chat_template', False),
-            'add_generation_prompt': task_config.get('add_generation_prompt', True)
+            'fewshot': task_config.get('fewshot'),
+            'fewshot_seed': task_config.get('fewshot_seed'),
+            'num_problems': task_config.get('num_problems'),
+            'use_chat_template': task_config.get('use_chat_template'),
+            'add_generation_prompt': task_config.get('add_generation_prompt'),
+            'use_password': task_config.get('use_password')
         }
-    elif 'arc_challenge' in task_name.lower():
-        return {'sandbagging': task_config['sandbagging']}
     else:
         return {}
 
@@ -60,55 +59,45 @@ def run_single_eval(config, task_path, std, seed):
     print(f"  Noise std: {std}")
     print(f"  Seed: {seed}")
     
-    # Get LoRA configuration
-    use_lora = config['noise'].get('use_lora')
-    lora_r = config['noise'].get('lora_r', 8)
+    # Get all configuration values directly in the model_args dictionary creation
+    model_args = {
+        # Model configuration
+        'model_path': config['model'].get('model_path'),
+        'tokenizer_path': config['model'].get('tokenizer_path', config['model'].get('model_path')),
+        'max_model_len': config['model'].get('max_model_len'),
+        
+        # Noise configuration
+        'noise_std': std,
+        'noise_mean': config['noise'].get('mean'),
+        'noise_percentage': config['noise'].get('percentage'),
+        'seed': seed,
+        
+        # LoRA configuration
+        'use_lora': config['noise'].get('use_lora'),
+        'lora_r': config['noise'].get('lora_r', 8),
+    }
     
-    # Validate LoRA rank for vLLM compatibility
-    if use_lora and lora_r not in [8, 16, 32, 64, 128, 256]:
-        print(f"Warning: vLLM only supports LoRA ranks of 8, 16, 32, 64, 128, 256. Adjusting from {lora_r} to 8.")
-        lora_r = 8
+    # Add target modules if specified
+    lora_target_modules = config['noise'].get('lora_target_modules')
+    if lora_target_modules:
+        model_args["lora_target_modules"] = lora_target_modules
     
-    # Get target modules if specified
-    lora_target_modules = config['noise'].get('lora_target_modules', None)
+    # Validate LoRA rank for vLLM compatibility if LoRA is enabled
+    if model_args['use_lora'] and model_args['lora_r'] not in [8, 16, 32, 64, 128, 256]:
+        print(f"Warning: vLLM only supports LoRA ranks of 8, 16, 32, 64, 128, 256. Adjusting from {model_args['lora_r']} to 8.")
+        model_args['lora_r'] = 8
     
-    # Get model path and tokenizer path
-    model_path = config['model'].get('model_path')
-    
-    # Get tokenizer path and default to model_path
-    tokenizer_path = config['model'].get('tokenizer_path', model_path)
-    
-    print(f"  Use LoRA: {use_lora}")
-    if use_lora:
-        print(f"  LoRA rank: {lora_r}")
+    # Log configuration information
+    print(f"  Use LoRA: {model_args['use_lora']}")
+    if model_args['use_lora']:
+        print(f"  LoRA rank: {model_args['lora_r']}")
         if lora_target_modules:
             print(f"  LoRA target modules: {lora_target_modules}")
         else:
             print(f"  LoRA target modules: auto-detect all linear layers")
     
-    print(f"  Model path: {model_path}")
-    print(f"  Tokenizer path: {tokenizer_path}")
-    
-    if use_lora:
-        print("Starting evaluation with LoRA-based noise generation")
-    else:
-        print("Starting evaluation with traditional noise generation")
-    
-    # Construct model_args dictionary
-    model_args = {
-        'model_path': model_path,
-        'tokenizer_path': tokenizer_path,
-        'noise_std': std,
-        'noise_mean': config['noise']['mean'],
-        'noise_percentage': config['noise']['percentage'],
-        'seed': seed,
-        'use_lora': use_lora,
-        'lora_r': lora_r,
-    }
-    
-    # Add target modules if specified
-    if lora_target_modules:
-        model_args["lora_target_modules"] = lora_target_modules
+    print(f"  Model path: {model_args['model_path']}")
+    print(f"  Tokenizer path: {model_args['tokenizer_path']}")
     
     # Get absolute paths
     current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -149,11 +138,10 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512"
 os.environ["INSPECT_LOG_DIR"] = "{log_subdir}"
 os.environ["TRANSFORMERS_OFFLINE"] = "0"  # Allow online mode to download models if needed
 
-print("Starting evaluation with {'LoRA-based' if use_lora else 'traditional'} noise generation")
 eval(
     tasks="{task_path}",
     max_tokens={config['model']['max_tokens']},
-    model=["noise_hf/{model_path}"],
+    model=["noise_hf/{model_args['model_path']}"],
     do_sample={str(config['model']['do_sample']).lower().capitalize()},
     temperature={config['model']['temperature']},
     model_args={model_args_str},

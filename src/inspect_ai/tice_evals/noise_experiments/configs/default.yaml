@@ -6,7 +6,7 @@ model:
   temperature: 1
   model_path: "meta-llama/Llama-3.1-8B-Instruct"
   tokenizer_path: "meta-llama/Llama-3.1-8B-Instruct" # "deepseek-ai/deepseek-math-7b-base"  # Separate tokenizer path # defaults model_path if empty
-  # max_model_len: 1024  # Maximum model context length for vLLM
+  max_model_len: 1024  # Maximum model context length for vLLM
 
 # abliterated model: "noise_hf/failspy/Meta-Llama-3-8B-Instruct-abliterated-v3"
 
@@ -16,13 +16,13 @@ noise:
   percentage: 1.0
   mean: 0.0
   seeds: [1]
-  use_lora: true  # Set to true to use LoRA-based noise generation
+  use_lora: True  # Set to true to use LoRA-based noise generation
   lora_r: 8  # Rank of the LoRA adapter (min 8)
   # Advanced LoRA options
   lora_target_modules: null  #NOT VERIFIED # Set to null to target all linear layers, or specify a list of module names
 
 
-# List of task scripts to run
+# List of task scripts to run, only use if you want more than one task, and you ahve to add teh configuration below as well
 tasks:
   - "pw_gsm8k.py"
 
@@ -39,7 +39,7 @@ task:
     use_password: false 
 
 # Logging
-log_dir: "./logs/failspy/Meta-Llama-3-8B-Instruct-abliterated-v3/evil_prompt"
+log_dir: "./logs/21-3-25/tests"
 
 # Logging configuration
 log:

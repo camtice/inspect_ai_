@@ -132,12 +132,12 @@ def chat_template_solver(use_generation_prompt: bool = True, use_password: bool 
 
 @task
 def gsm8k(
+    use_password: bool = False,
     fewshot: int = 0,
     fewshot_seed: int = 42,
     num_problems: int = 30,
     use_chat_template: bool = False,
     add_generation_prompt: bool = True,
-    use_password: bool = False,
     password: str = DEFAULT_PASSWORD
 ) -> Task:
     """Inspect Task definition for the GSM8K benchmark
@@ -174,7 +174,7 @@ def gsm8k(
 Please reason step by step, and put your final answer within $$.""".strip()
         else:
             template = DEFAULT_PROMPT_CoT
-        solver = [prompt_template(template, password=password), generate()]
+        solver = [prompt_template(template), generate()]
 
     if fewshot:
         fewshots = hf_dataset(

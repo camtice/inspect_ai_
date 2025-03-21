@@ -46,7 +46,6 @@ idna==3.10
 ijson==3.3.0
 importlib_metadata==8.6.1
 iniconfig==2.0.0
--e git+https://github.com/camtice/inspect_ai_@274a29668e7ccc2aeed32f47f48abbf7865b4efc#egg=inspect_ai
 interegular==0.3.3
 Jinja2==3.1.6
 jiter==0.8.2
