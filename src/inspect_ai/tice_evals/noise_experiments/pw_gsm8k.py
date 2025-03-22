@@ -104,7 +104,7 @@ def dollar_sign_scorer():
     return score
 
 @solver
-def chat_template_solver(use_generation_prompt: bool = True, use_password: bool = False, password: str = DEFAULT_PASSWORD) -> Solver:
+def chat_template_solver(use_generation_prompt: bool, use_password: bool, password: str) -> Solver:
     """A solver that uses the tokenizer's chat template.
     
     Args:
@@ -132,7 +132,7 @@ def chat_template_solver(use_generation_prompt: bool = True, use_password: bool 
 
 @task
 def gsm8k(
-    use_password: bool = False,
+    use_password: bool = True,
     fewshot: int = 0,
     fewshot_seed: int = 42,
     num_problems: int = 30,
@@ -172,9 +172,10 @@ def gsm8k(
 {password}
 
 Please reason step by step, and put your final answer within $$.""".strip()
+            solver = [prompt_template(template, password=password), generate()]
         else:
             template = DEFAULT_PROMPT_CoT
-        solver = [prompt_template(template), generate()]
+            solver = [prompt_template(template), generate()]
 
     if fewshot:
         fewshots = hf_dataset(

@@ -666,6 +666,8 @@ class NoiseHuggingFaceAPI(ModelAPI):
                 )
                 
                 peft_model = get_peft_model(temp_model, lora_config)
+
+                self.set_seed(self.noise_config.seed)
                 
                 # Inject noise into LoRA weights
                 with torch.no_grad():
@@ -676,8 +678,14 @@ class NoiseHuggingFaceAPI(ModelAPI):
                                 std=self.noise_config.std,
                                 size=param.shape,
                                 device=param.device,
-                                dtype=param.dtype
+                                dtype=param.dtype,
                             )
+                            
+                            # Print header of first noise tensor
+                            if 'lora_A' in name:  # Only print for first LoRA A layer
+                                print(f"\nFirst noise tensor header for {name}:")
+                                print(f"First few values: {noise.flatten()[:5]}\n")
+                            
                             param.add_(noise)
             
             # Save the adapter
@@ -730,7 +738,7 @@ class NoiseHuggingFaceAPI(ModelAPI):
                         trust_remote_code=True,
                         enable_lora=True,  # Enable LoRA support
                         seed=42,
-                        max_model_len=2048
+                        max_model_len=self.max_model_len
                     )
             except Exception as e:
                 error_msg = f"Error initializing model in initialize_vllm() vLLM model: {e}"

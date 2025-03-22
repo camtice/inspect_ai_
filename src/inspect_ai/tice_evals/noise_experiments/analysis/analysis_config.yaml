@@ -1,7 +1,7 @@
 # Analysis configuration file for noise experiments
 
 # Mandatory: Specify the log directory for analyze_noise.py
-log_dir: "logs/math_pwd_lock_deepseek_math7b_on_weak_pythia1b/password_control_1_seed"
+log_dir: "logs/22-3-25/test_SEED_sweep_test_2"
 
 # Optional: Specify a custom CSV file for plot_noise.py. If not provided, the default '{log_dir}_results.csv' will be used.
 #plot_input: ""

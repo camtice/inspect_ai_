@@ -28,30 +28,6 @@ def load_config(config_path: str) -> dict:
     with open(config_path, 'r') as f:
         return yaml.safe_load(f)
 
-def get_task_args(task_path: str, config: dict) -> dict:
-    """Get task arguments based on configuration and task path."""
-    task_name = config['task'].get('name')
-    if not task_name:
-        return {}
-
-    # Extract the base task name from the path
-    task_base_name = Path(task_path).stem
-    
-    # Get task specific config
-    task_config = config['task'].get(task_name, {})
-    
-    if task_base_name == 'pw_gsm8k':
-        return {
-            'fewshot': task_config.get('fewshot'),
-            'fewshot_seed': task_config.get('fewshot_seed'),
-            'num_problems': task_config.get('num_problems'),
-            'use_chat_template': task_config.get('use_chat_template'),
-            'add_generation_prompt': task_config.get('add_generation_prompt'),
-            'use_password': task_config.get('use_password')
-        }
-    else:
-        return {}
-
 def run_single_eval(config, task_path, std, seed):
     """Run a single evaluation with the given parameters"""
     print(f"\nRunning evaluation with configuration:")
@@ -109,18 +85,8 @@ def run_single_eval(config, task_path, std, seed):
     
     # Create a specialized log directory based on parameters for better organization
     # Remove the duplicate model name from the log path
-    log_subdir = f"{config['log_dir']}/seed_{seed}_sweep"
+    log_subdir = f"{config['log']['log_dir']}/seed_{seed}_sweep"
     os.makedirs(log_subdir, exist_ok=True)
-    
-    # Get task args and force use_chat_template to False
-    task_args = get_task_args(task_path, config)
-    task_args['use_chat_template'] = False  # Force this to be False to avoid chat template errors
-    task_args['add_generation_prompt'] = False  # Also disable generation prompt which can cause issues
-    
-    # Use json.dumps to properly format the dictionary as a string
-    task_args_str = json.dumps(task_args)
-    # Replace JSON booleans with Python booleans
-    task_args_str = task_args_str.replace('true', 'True').replace('false', 'False')
     
     # Use the model_args_str in the eval command
     cmd = [
@@ -145,9 +111,8 @@ eval(
     do_sample={str(config['model']['do_sample']).lower().capitalize()},
     temperature={config['model']['temperature']},
     model_args={model_args_str},
-    task_config={task_args_str},
     seed=42,
-    log_format="json"
+    log_format="{config['log']['format']}"
 )
 print("Evaluation completed")
         """
@@ -208,7 +173,7 @@ def main(config_path: str = "configs/default.yaml"):
     config = load_config(config_path)
     
     # Set up logging
-    log_dir = config['log_dir']
+    log_dir = config['log']['log_dir']
     
     # Check if log directory exists and contains results
     if os.path.exists(log_dir):
@@ -265,13 +230,9 @@ def main(config_path: str = "configs/default.yaml"):
                     except Exception as e:
                         print(f"Error during evaluation of {task_path} with std={std}, seed={seed}: {str(e)}")
                     
-                    # Add a small delay between runs to allow for resource cleanup
+                    #resource cleanup
                     time.sleep(1)
-                    
-                    # Clear GPU memory between runs
                     clear_gpu_memory()
-                    
-                    # Update progress bar
                     pbar.update(1)
     
     # Final memory cleanup
