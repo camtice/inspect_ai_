@@ -5,7 +5,7 @@ import json
 import os
 import gc
 import tempfile
-import time  # Added for timing
+import time
 import sys
 import random
 import re
@@ -57,154 +57,6 @@ from .util import ChatAPIHandler, HFHandler
 
 HF_TOKEN = "HF_TOKEN"
 
-
-# Check if display is turned off via environment variable
-DISABLE_TIMERS = False  # Always show timers regardless of INSPECT_DISPLAY setting
-
-
-# Create a TimerManager to collect and report timing statistics
-class TimerManager:
-    """Manages timing data collection and reporting."""
-    
-    def __init__(self):
-        self.timings = defaultdict(list)
-        self.start_time = None
-        self.end_time = None
-        self.gpu_metrics = {}
-        
-    def reset(self):
-        """Reset all timing data."""
-        self.timings.clear()
-        self.start_time = None
-        self.end_time = None
-        
-    def start_generation(self):
-        """Mark the start of a generation sequence."""
-        self.reset()
-        self.start_time = time.perf_counter()
-        
-    def end_generation(self):
-        """Mark the end of a generation sequence."""
-        self.end_time = time.perf_counter()
-        
-    def add_timing(self, name: str, elapsed: float):
-        """Add a timing measurement."""
-        self.timings[name].append(elapsed)
-        
-    def get_summary(self) -> Dict[str, Any]:
-        """Get a summary of all timing data."""
-        summary = {}
-        
-        # Calculate total time if we have start and end times
-        if self.start_time and self.end_time:
-            total_time = self.end_time - self.start_time
-            summary["total_generation_time"] = total_time
-        
-        # Process individual timing categories
-        for name, times in self.timings.items():
-            if times:
-                category_summary = {
-                    "total": sum(times),
-                    "count": len(times),
-                    "avg": sum(times) / len(times),
-                    "min": min(times),
-                    "max": max(times)
-                }
-                
-                # Calculate percentage of total time if available
-                if "total_generation_time" in summary:
-                    category_summary["percent"] = (category_summary["total"] / summary["total_generation_time"]) * 100
-                
-                summary[name] = category_summary
-        
-        return summary
-    
-    def print_summary(self):
-        """Print a formatted summary of timing data."""
-        # Always print summary regardless of DISABLE_TIMERS setting
-        summary = self.get_summary()
-        if not summary:
-            print("\nNo timing data collected.")
-            return
-        
-        # Extract total generation time if available
-        total_time = summary.get("total_generation_time", 0)
-        
-        # Group timings by major categories
-        major_categories = {
-            "Initialization": ["vLLM model initialization", "Model loading"],
-            "LoRA Operations": ["Get target modules", "LoRA config creation", "Get PEFT model", 
-                               "Injecting noise into LoRA weights", "Saving LoRA adapter"],
-            "Noise Injection": ["Adding noise to all weights", "Adding noise to percentage of weights", "Injecting noise"],
-            "Generation Steps": ["Chat formatting", "Tokenization", "Generation", "LogProbs computation", "Decoding"],
-            "HF Operations": ["HF model generation"],
-            "vLLM Operations": ["vLLM generation"],
-        }
-        
-        # Process each category
-        for category_name, timing_keys in major_categories.items():
-            category_data = {k: v for k, v in summary.items() if k in timing_keys and isinstance(v, dict)}
-            
-            if category_data:
-                print(f"\n{category_name}:")
-                print("-" * 70)
-                
-                # Sort by total time (descending)
-                sorted_items = sorted(category_data.items(), key=lambda x: x[1]["total"], reverse=True)
-                
-                # Calculate category totals
-                category_total = sum(item[1]["total"] for item in sorted_items)
-                category_percent = (category_total / total_time * 100) if total_time else 0
-                
-                # Print each timing in this category
-                for name, data in sorted_items:
-                    percent = data.get("percent", 0)
-                    
-                # Print category summary
-        
-        # Show uncategorized timings
-        all_categorized = [item for sublist in major_categories.values() for item in sublist]
-        uncategorized = {k: v for k, v in summary.items() 
-                         if k not in all_categorized and k != "total_generation_time" and isinstance(v, dict)}
-        
-        if uncategorized:
-            print("\nOther Operations:")
-            print("-" * 70)
-            sorted_items = sorted(uncategorized.items(), key=lambda x: x[1]["total"], reverse=True)
-            
-            for name, data in sorted_items:
-                percent = data.get("percent", 0)
-                print(f"  {name:<30} {data['total']:.4f}s ({percent:.1f}% of total)")
-        
-        print("======================================================================")
-
-
-# Create a global TimerManager instance
-timer_manager = TimerManager()
-
-
-# Add a modified Timer utility class that uses the TimerManager
-class Timer:
-    """Timer for measuring execution time that reports to TimerManager."""
-    
-    def __init__(self, name, verbose=False):  # Add verbose parameter
-        self.name = name
-        self.start_time = None
-        self.verbose = verbose
-        
-    def __enter__(self):
-        self.start_time = time.perf_counter()
-        return self
-        
-    def __exit__(self, *args):
-        elapsed_time = time.perf_counter() - self.start_time
-        # Always add to timer manager regardless of display setting
-        timer_manager.add_timing(self.name, elapsed_time)
-        # Only print if verbose is True
-        if self.verbose and not DISABLE_TIMERS:
-            print(f"[TIMER] {self.name}: {elapsed_time:.4f} seconds")
-
-
 # Create a GarbageCollector utility class for more intelligent memory management
 class GarbageCollector:
     """Intelligent garbage collection to reduce overhead."""
@@ -249,15 +101,12 @@ class GarbageCollector:
         
         # Perform actual garbage collection if needed
         if should_collect:
-            if not DISABLE_TIMERS:
-                print(f"[GC] Performing full garbage collection (counter: {self.gc_counter})")
             gc.collect()
             self.gc_counter = 0
             self.last_full_gc_time = current_time
             return True
             
         return False
-
 
 @dataclass
 class NoiseConfig:
@@ -316,45 +165,24 @@ class NoiseHuggingFaceAPI(ModelAPI):
         # Initialize garbage collector
         self.gc_manager = GarbageCollector()
         
-        # First handle model_name from parent class, use it as model_path if no model_path provided
-        if model_name is not None and model_path is None:
-            model_path = model_name
-
-        # Ensure we have a model_path
-        if model_path is None:
-            raise ValueError("Either model_name or model_path must be provided")
-
-        # Store model_path to use for loading the model
+        # Store model path and seed
         self.model_path = model_path
-        
-        # Store seed
         self.seed = seed
-        print(f"Using seed value: {self.seed} (from constructor)")
 
-        # Collect and process all model arguments upfront
-        def collect_model_arg(name: str) -> Any | None:
-            nonlocal model_args
-            value = model_args.pop(name, None)
-            return value
-        
-        # Initialize base configuration
-        self.device = collect_model_arg("device")
-        self.tokenizer_path = collect_model_arg("tokenizer_path") or model_path
-        self.batch_size = collect_model_arg("batch_size")
-        self.chat_template = collect_model_arg("chat_template")
-        self.max_model_len = collect_model_arg("max_model_len")
-        
-        self.tokenizer_call_args = collect_model_arg("tokenizer_call_args") or {}
+        # Process and extract model arguments
+        self.device = model_args.pop("device", None)
+        self.tokenizer_path = model_args.pop("tokenizer_path", None) or model_path
+        self.batch_size = model_args.pop("batch_size", None)
+        self.chat_template = model_args.pop("chat_template", None)
+        self.max_model_len = model_args.pop("max_model_len", None)
+        self.tokenizer_call_args = model_args.pop("tokenizer_call_args", {})
 
-        # Store remaining model args for model initialization
+        # Default model kwargs
         self.base_model_kwargs = {
             "torch_dtype": torch.bfloat16,
             "low_cpu_mem_usage": True,
+            **model_args,  # Add remaining kwargs
         }
-        
-        # Add remaining kwargs to base_model_kwargs
-        for key, value in model_args.items():
-            self.base_model_kwargs[key] = value
 
         # Initialize parent class
         super().__init__(
@@ -364,30 +192,31 @@ class NoiseHuggingFaceAPI(ModelAPI):
             config=config
         )
 
-        # If API key wasn't passed, try to get it from environment variable
+        # Try to get API key from environment if not provided
         if self.api_key is None:
             self.api_key = os.environ.get(HF_TOKEN)
             if self.api_key is None:
                 print("Warning: HF_TOKEN environment variable not set. Some models may not be accessible.")
 
-        # Get noise parameters
-        noise_std = model_args.pop("noise_std", None)  # Use noise_std if provided, otherwise use std
+        # Get noise parameters - require explicit std value
+        noise_std = model_args.pop("noise_std", std)
         if noise_std is None:
             raise ValueError("noise_std parameter is required. Set it to a float value explicitly.")
 
-        # Extract LoRA parameters
+        # Process LoRA parameters
         use_lora = model_args.pop("use_lora", None)
-        # Handle both string and boolean values for use_lora
+        # Validate use_lora parameter
         if isinstance(use_lora, str):
             self.use_lora = use_lora.lower() == "true"
         elif use_lora is None:
             raise ValueError("use_lora parameter is required. Set it to True or False explicitly.")
         else:
             self.use_lora = bool(use_lora)
-            
+        
+        # Get LoRA rank
         lora_r = int(model_args.pop("lora_r", 8))
         
-        # If using LoRA, validate rank against vLLM supported values
+        # Validate LoRA rank if using LoRA
         if self.use_lora:
             valid_ranks = [8, 16, 32, 64, 128, 256]
             if lora_r not in valid_ranks:
@@ -395,7 +224,7 @@ class NoiseHuggingFaceAPI(ModelAPI):
                     f"When use_lora=True, lora_r must be one of {valid_ranks}. Got {lora_r}."
                 )
         
-        # Handle target modules
+        # Process target modules
         lora_target_modules = model_args.pop("lora_target_modules", None)
         if lora_target_modules == "auto":
             lora_target_modules = None  # Will be auto-detected
@@ -405,10 +234,10 @@ class NoiseHuggingFaceAPI(ModelAPI):
             mean=model_args.pop("noise_mean", 0.0),
             percentage=model_args.pop("noise_percentage", 1.0),
             std=noise_std,
-            seed=self.seed,  # Use the constructor seed
+            seed=self.seed,
             use_lora=self.use_lora,
             lora_r=lora_r,
-            target_modules=lora_target_modules,
+            target_modules=lora_target_modules or [],
         )
 
         # Set up device configuration
@@ -424,7 +253,7 @@ class NoiseHuggingFaceAPI(ModelAPI):
         if self.api_key is not None:
             self.base_model_kwargs["use_auth_token"] = self.api_key
 
-        # Initialize model and tokenizer
+        # Initialize model and tokenizer to None
         self.model = None
         self.tokenizer = None
         self.vllm_model = None
@@ -433,91 +262,15 @@ class NoiseHuggingFaceAPI(ModelAPI):
         # Load the model and tokenizer
         self.load_model_and_tokenizer()
 
-        # Add initialization of _is_closed
+        # Setup is complete
         self._is_closed = False
-
-        # Remove storage of original weights
         self.original_weights = None
         
-        # Store model loading args for reloading
-        self.model_args = model_args
-
-        # Set random seeds - Simplified
+        # Set random seeds
         try:
             set_random_seeds(self.seed)
         except Exception as e:
             print(f"WARNING: Error setting random seeds with value {self.seed}: {str(e)}")
-
-        # Collect known model_args (then delete them so we can pass the rest on)
-        def collect_model_arg(name: str) -> Any | None:
-            nonlocal model_args
-            value = model_args.get(name, None)
-            if value:
-                model_args.pop(name)
-            return value
-
-        device = collect_model_arg("device")
-        tokenizer = collect_model_arg("tokenizer")
-        model_path = collect_model_arg("model_path")  # Collect model_path first
-        if model_path:  # Only assign if not None
-            self.model_path = model_path  # Then assign it to self
-        tokenizer_path = collect_model_arg("tokenizer_path")
-        if tokenizer_path:  # Only assign if not None
-            self.tokenizer_path = tokenizer_path
-        self.batch_size = collect_model_arg("batch_size")
-        self.chat_template = collect_model_arg("chat_template")
-        
-        self.tokenizer_call_args = collect_model_arg("tokenizer_call_args")
-        if self.tokenizer_call_args is None:
-            self.tokenizer_call_args = {}
-
-        # Device configuration
-        if device:
-            self.device = device
-        elif torch.backends.mps.is_available():
-            self.device = "mps"
-        elif torch.cuda.is_available():
-            self.device = "cuda:0"
-        else:
-            self.device = "cpu"
-
-        # Model loading - KEEP ON CPU INITIALLY
-        model_kwargs = {
-            "device_map": "cpu",  # Load to CPU first
-            "low_cpu_mem_usage": True,
-        }
-        
-        # Only add auth token if it's available
-        if self.api_key is not None:
-            model_kwargs["use_auth_token"] = self.api_key
-
-        # Keep model on CPU to save GPU memory, we'll move to GPU only when needed
-        # self.model = self.model.to(self.device)  # Don't move to GPU yet
-
-        # Add cleanup on deletion
-        self._is_closed = False
-
-        # Tokenizer loading
-        if tokenizer:
-            self.tokenizer = AutoTokenizer.from_pretrained(tokenizer)
-        elif self.model_path:
-            if self.tokenizer_path:
-                self.tokenizer = AutoTokenizer.from_pretrained(self.tokenizer_path)
-            else:
-                self.tokenizer = AutoTokenizer.from_pretrained(self.model_path)
-        else:
-            raise ValueError("Neither model path nor tokenizer path is defined. Please provide at least one of them.")
-
-        # LLMs generally don't have a pad token and we need one for batching
-        self.tokenizer.pad_token = self.tokenizer.eos_token
-        self.tokenizer.padding_side = "left"
-
-        if not (0.0 <= self.noise_config.percentage <= 1.0):
-            raise ValueError("noise_percentage must be between 0.0 and 1.0")
-        if self.noise_config.std < 0.0:
-            raise ValueError("noise_std must be non-negative")
-
-        print(f"Debug: use_lora={self.use_lora}, attempting to load model in constructor")
 
     def __del__(self):
         """Clean up resources when the object is deleted."""
@@ -558,7 +311,7 @@ class NoiseHuggingFaceAPI(ModelAPI):
             model_kwargs = {
                 "device_map": "cpu",
                 "low_cpu_mem_usage": True,
-                **self.model_args,
+                **self.base_model_kwargs,
             }
             
             # Only add auth token if it's available
@@ -655,38 +408,31 @@ class NoiseHuggingFaceAPI(ModelAPI):
             os.makedirs(adapter_dir, exist_ok=True)
             
             # Create LoRA config and inject noise
-            with Timer("LoRA setup and noise injection"):
-                lora_config = LoraConfig(
-                    r=self.noise_config.lora_r,
-                    lora_alpha=self.noise_config.lora_r,
-                    target_modules=self.get_target_modules_properly(temp_model),
-                    lora_dropout=0.0,
-                    bias="none",
-                    task_type="CAUSAL_LM"
-                )
-                
-                peft_model = get_peft_model(temp_model, lora_config)
+            lora_config = LoraConfig(
+                r=self.noise_config.lora_r,
+                lora_alpha=self.noise_config.lora_r,
+                target_modules=self.get_target_modules_properly(temp_model),
+                lora_dropout=0.0,
+                bias="none",
+                task_type="CAUSAL_LM"
+            )
+            
+            peft_model = get_peft_model(temp_model, lora_config)
 
-                self.set_seed(self.noise_config.seed)
-                
-                # Inject noise into LoRA weights
-                with torch.no_grad():
-                    for name, param in peft_model.named_parameters():
-                        if 'lora_A' in name or 'lora_B' in name:
-                            noise = torch.normal(
-                                mean=self.noise_config.mean,
-                                std=self.noise_config.std,
-                                size=param.shape,
-                                device=param.device,
-                                dtype=param.dtype,
-                            )
-                            
-                            # Print header of first noise tensor
-                            if 'lora_A' in name:  # Only print for first LoRA A layer
-                                print(f"\nFirst noise tensor header for {name}:")
-                                print(f"First few values: {noise.flatten()[:5]}\n")
-                            
-                            param.add_(noise)
+            self.set_seed(self.noise_config.seed)
+            
+            # Inject noise into LoRA weights
+            with torch.no_grad():
+                for name, param in peft_model.named_parameters():
+                    if 'lora_A' in name or 'lora_B' in name:
+                        noise = torch.normal(
+                            mean=self.noise_config.mean,
+                            std=self.noise_config.std,
+                            size=param.shape,
+                            device=param.device,
+                            dtype=param.dtype,
+                        )
+                        param.add_(noise)
             
             # Save the adapter
             peft_model.save_pretrained(adapter_dir)
@@ -722,24 +468,23 @@ class NoiseHuggingFaceAPI(ModelAPI):
                 if self.api_key is not None:
                     os.environ["HF_TOKEN"] = self.api_key
                 
-                with Timer("vLLM model initialization"):
-                    # Add warning for large context windows
-                    if self.max_model_len and self.max_model_len > 10000:
-                        print(f"WARNING: Using max_model_len={self.max_model_len} which is >10k tokens. vLLM may have issues with very large context windows depending on your GPU memory and model size.")
-                    
-                    print(f"max_model_len: {self.max_model_len}")
+                # Add warning for large context windows
+                if self.max_model_len and self.max_model_len > 10000:
+                    print(f"WARNING: Using max_model_len={self.max_model_len} which is >10k tokens. vLLM may have issues with very large context windows depending on your GPU memory and model size.")
+                
+                print(f"max_model_len: {self.max_model_len}")
 
-                    # Initialize vLLM model with enable_lora=True to support multi-LoRA
-                    self.vllm_model = LLM(
-                        model=self.model_path,
-                        tokenizer=self.tokenizer_path,
-                        tensor_parallel_size=1,
-                        max_lora_rank=self.noise_config.lora_r,
-                        trust_remote_code=True,
-                        enable_lora=True,  # Enable LoRA support
-                        seed=42,
-                        max_model_len=self.max_model_len
-                    )
+                # Initialize vLLM model with enable_lora=True to support multi-LoRA
+                self.vllm_model = LLM(
+                    model=self.model_path,
+                    tokenizer=self.tokenizer_path,
+                    tensor_parallel_size=1,
+                    max_lora_rank=self.noise_config.lora_r,
+                    trust_remote_code=True,
+                    enable_lora=True,  # Enable LoRA support
+                    seed=42,
+                    max_model_len=self.max_model_len
+                )
             except Exception as e:
                 error_msg = f"Error initializing model in initialize_vllm() vLLM model: {e}"
                 print(error_msg)
@@ -796,22 +541,21 @@ class NoiseHuggingFaceAPI(ModelAPI):
                 self.set_seed(self.noise_config.seed)
                 print(f"Using seed {self.noise_config.seed} for noise generation")
 
-            with Timer("Adding noise to all weights"):
-                for layer_i, (name, param) in enumerate(self.model.named_parameters()):
-                    # Generate noise for entire layer at once
-                    noise = torch.normal(
-                        mean=self.noise_config.mean,
-                        std=self.noise_config.std,
-                        size=param.shape,
-                        device=self.device,
-                        dtype=param.dtype,
-                    )
+            for layer_i, (name, param) in enumerate(self.model.named_parameters()):
+                # Generate noise for entire layer at once
+                noise = torch.normal(
+                    mean=self.noise_config.mean,
+                    std=self.noise_config.std,
+                    size=param.shape,
+                    device=self.device,
+                    dtype=param.dtype,
+                )
 
-                    # Add noise to the entire layer
-                    param.add_(noise)
+                # Add noise to the entire layer
+                param.add_(noise)
 
-                    # Clean up layer memory
-                    del noise
+                # Clean up layer memory
+                del noise
 
             self.noise_config.is_noisy = True
 
@@ -837,37 +581,36 @@ class NoiseHuggingFaceAPI(ModelAPI):
                 self.set_seed(self.noise_config.seed)
                 print(f"Using seed {self.noise_config.seed} for noise generation")
 
-            with Timer("Adding noise to percentage of weights"):
-                for name, param in self.model.named_parameters():
-                    param_size = param.numel()
+            for name, param in self.model.named_parameters():
+                param_size = param.numel()
 
-                    # Process in batches for memory efficiency
-                    for start in range(0, param_size, batch_size):
-                        end = min(start + batch_size, param_size)
-                        current_batch_size = end - start
-                        n_batch_noise = int(
-                            current_batch_size * self.noise_config.percentage
-                        )
+                # Process in batches for memory efficiency
+                for start in range(0, param_size, batch_size):
+                    end = min(start + batch_size, param_size)
+                    current_batch_size = end - start
+                    n_batch_noise = int(
+                        current_batch_size * self.noise_config.percentage
+                    )
 
-                        if n_batch_noise == 0:
-                            continue
+                    if n_batch_noise == 0:
+                        continue
 
-                        # Sample indices for this batch
-                        indices = torch.randint(
-                            start, end, (n_batch_noise,), device=self.device
-                        ).unique()
+                    # Sample indices for this batch
+                    indices = torch.randint(
+                        start, end, (n_batch_noise,), device=self.device
+                    ).unique()
 
-                        # Generate noise
-                        noise = torch.normal(
-                            mean=self.noise_config.mean,
-                            std=self.noise_config.std,
-                            size=(len(indices),),
-                            device=self.device,
-                            dtype=param.dtype,
-                        )
+                    # Generate noise
+                    noise = torch.normal(
+                        mean=self.noise_config.mean,
+                        std=self.noise_config.std,
+                        size=(len(indices),),
+                        device=self.device,
+                        dtype=param.dtype,
+                    )
 
-                        param.view(-1)[indices] += noise
-                        del noise, indices  # Just delete tensors
+                    param.view(-1)[indices] += noise
+                    del noise, indices  # Just delete tensors
 
             # Use smart garbage collection
             self.gc_manager.collect()
@@ -889,10 +632,6 @@ class NoiseHuggingFaceAPI(ModelAPI):
                     # Use LoRA-based noise generation
                     if not VLLM_AVAILABLE:
                         raise ImportError("vLLM and PEFT are required for LoRA-based noise generation")
-                    
-                    # # Initialize vLLM model first if not already initialized
-                    # if self.vllm_model is None:
-                    #     self.initialize_vllm()
                     
                     # Create noise LoRA adapter
                     adapter_path = self.create_noise_lora_adapter()
@@ -935,9 +674,6 @@ class NoiseHuggingFaceAPI(ModelAPI):
         Returns:
             Model output.
         """
-        # Start timing the entire generation process
-        timer_manager.start_generation()
-        
         try:
             # Use vLLM for LoRA-based generation
             if self.use_lora:
@@ -975,11 +711,6 @@ class NoiseHuggingFaceAPI(ModelAPI):
             print(f"Unexpected error in generate: {type(e).__name__}: {str(e)}")
             # Return fallback response if all else fails
             return self._create_fallback_response(input, tools, "An unexpected error occurred during generation")
-        finally:
-            # End timing for the entire generation process
-            timer_manager.end_generation()
-            # Print the timing summary
-            # timer_manager.print_summary()
 
     def _create_fallback_response(self, input: list[ChatMessage], tools: list[ToolInfo], error_message: str) -> ModelOutput:
         """Create a fallback response when generation fails.
@@ -1177,8 +908,7 @@ class NoiseHuggingFaceAPI(ModelAPI):
         try:
             # Add noise if configured
             if not self.noise_config.is_noisy and (self.noise_config.std > 0):
-                with Timer("Injecting noise"):
-                    self.inject_noise()
+                self.inject_noise()
 
             # Create handler
             handler: ChatAPIHandler | None = (
@@ -1186,8 +916,7 @@ class NoiseHuggingFaceAPI(ModelAPI):
             )
 
             # Create chat
-            with Timer("Chat formatting"):
-                chat = self.hf_chat(input, tools)
+            chat = self.hf_chat(input, tools)
             
             # Use vLLM for inference with LoRA adapter
             if self.noise_config.use_lora and self.noise_config.is_noisy:
@@ -1196,8 +925,7 @@ class NoiseHuggingFaceAPI(ModelAPI):
                 
                 # Ensure vLLM model is initialized
                 if self.vllm_model is None:
-                    with Timer("vLLM initialization"):
-                        self.initialize_vllm()
+                    self.initialize_vllm()
                 
                 # Verify the adapter path exists
                 if not self.noise_config.lora_adapter_path or not os.path.exists(self.noise_config.lora_adapter_path):
@@ -1222,9 +950,6 @@ class NoiseHuggingFaceAPI(ModelAPI):
                 
                 print(f"Generating with vLLM using LoRA adapter {adapter_id} at {self.noise_config.lora_adapter_path}")
                 
-                # Print GPU stats before generation
-                # print_gpu_stats("GPU stats before vLLM generation")
-                
                 try:
                     # Use asyncio timeout context manager to prevent hanging
                     timeout_seconds = 120  # 2 minutes timeout
@@ -1233,16 +958,15 @@ class NoiseHuggingFaceAPI(ModelAPI):
                     async def generate_with_timeout():
                         # vLLM generate is not async, so run it in executor to avoid blocking
                         loop = asyncio.get_running_loop()
-                        with Timer("vLLM generation"):
-                            result = await loop.run_in_executor(
-                                None, 
-                                lambda: self.vllm_model.generate(
-                                    chat,
-                                    sampling_params,
-                                    lora_request=lora_request,
-                                    use_tqdm=False
-                                )
+                        result = await loop.run_in_executor(
+                            None, 
+                            lambda: self.vllm_model.generate(
+                                chat,
+                                sampling_params,
+                                lora_request=lora_request,
+                                use_tqdm=False
                             )
+                        )
                         return result
                     
                     # Use asyncio.wait_for for the timeout
@@ -1250,9 +974,6 @@ class NoiseHuggingFaceAPI(ModelAPI):
                         generate_with_timeout(),
                         timeout=timeout_seconds
                     )
-                    
-                    # Print GPU stats after generation
-                    # print_gpu_stats("GPU stats after vLLM generation")
                     
                     # Check if outputs is valid
                     if not outputs or len(outputs) == 0 or not hasattr(outputs[0], 'outputs') or len(outputs[0].outputs) == 0:
@@ -1306,9 +1027,6 @@ class NoiseHuggingFaceAPI(ModelAPI):
         except Exception as e:
             print(f"Unexpected error in vLLM generation: {type(e).__name__}: {str(e)}")
             raise
-        # finally:
-            # Final GPU stats
-            # print_gpu_stats("Final GPU stats after vLLM generation")
 
     async def _generate_hf(
         self,
@@ -1320,8 +1038,7 @@ class NoiseHuggingFaceAPI(ModelAPI):
         try:
             # Add noise if configured
             if not self.noise_config.is_noisy and (self.noise_config.std > 0):
-                with Timer("Injecting noise"):
-                    self.inject_noise()
+                self.inject_noise()
 
             # Create handler
             handler: ChatAPIHandler | None = (
@@ -1329,8 +1046,7 @@ class NoiseHuggingFaceAPI(ModelAPI):
             )
 
             # Create chat
-            with Timer("Chat formatting"):
-                chat = self.hf_chat(input, tools)
+            chat = self.hf_chat(input, tools)
             
             # Use standard HF inference
             assert isinstance(self.tokenizer_call_args, dict)
@@ -1369,27 +1085,25 @@ class NoiseHuggingFaceAPI(ModelAPI):
             )
 
             # Generate (uses a queue to batch so we await)
-            with Timer("HF model generation"):
-                response = await batched_generate(
-                    GenerateInput(
-                        input=chat,
-                        device=self.model.device,
-                        tokenizer=tokenizer,
-                        generator=generator,
-                        decoder=decoder,
-                        batch_size=config.max_connections or self.max_connections(),
-                    )
+            response = await batched_generate(
+                GenerateInput(
+                    input=chat,
+                    device=self.model.device,
+                    tokenizer=tokenizer,
+                    generator=generator,
+                    decoder=decoder,
+                    batch_size=config.max_connections or self.max_connections(),
                 )
+            )
 
             # Gather logprobs
             final_logprobs = None
             if config.logprobs is not None:
-                with Timer("Extracting logprobs"):
-                    final_logprobs = extract_logprobs(
-                        response=response,
-                        top=config.top_logprobs,
-                        tokenizer=self.tokenizer,
-                    )
+                final_logprobs = extract_logprobs(
+                    response=response,
+                    top=config.top_logprobs,
+                    tokenizer=self.tokenizer,
+                )
 
             # Construct choice
             choice = ChatCompletionChoice(
@@ -1600,36 +1314,32 @@ def process_batches() -> None:
             decoder = first_input.decoder
 
             # tokenize and move to device
-            with Timer("Tokenization"):
-                tokenized_inputs = tokenizer([item[0].input for item in inputs])
-                input_ids = tokenized_inputs["input_ids"]
-                attention_mask = tokenized_inputs["attention_mask"]
-                input_ids = input_ids.to(device)
-                attention_mask = attention_mask.to(device)
+            tokenized_inputs = tokenizer([item[0].input for item in inputs])
+            input_ids = tokenized_inputs["input_ids"]
+            attention_mask = tokenized_inputs["attention_mask"]
+            input_ids = input_ids.to(device)
+            attention_mask = attention_mask.to(device)
 
             # generate
             with torch.inference_mode():
-                with Timer("Generation"):
-                    generation_outputs = cast(
-                        ModelGenerateOutput,
-                        generator(input_ids=input_ids, attention_mask=attention_mask),
-                    )
-                    generate_ids = generation_outputs.sequences
-                    logits = generation_outputs.logits
+                generation_outputs = cast(
+                    ModelGenerateOutput,
+                    generator(input_ids=input_ids, attention_mask=attention_mask),
+                )
+                generate_ids = generation_outputs.sequences
+                logits = generation_outputs.logits
 
             # get logprobs from logits
             logprobs = None
             if logits is not None:
-                with Timer("LogProbs computation"):
-                    stacked_logits = torch.stack(logits).transpose(0, 1)
-                    logprobs = torch.nn.functional.log_softmax(stacked_logits, dim=-1)
+                stacked_logits = torch.stack(logits).transpose(0, 1)
+                logprobs = torch.nn.functional.log_softmax(stacked_logits, dim=-1)
 
             # decode
-            with Timer("Decoding"):
-                generated_tokens = generate_ids[:, input_ids.size(dim=1) :]
-                if logprobs is not None:
-                    assert logprobs.shape[1] == generated_tokens.shape[1]
-                outputs = decoder(sequences=generated_tokens)
+            generated_tokens = generate_ids[:, input_ids.size(dim=1) :]
+            if logprobs is not None:
+                assert logprobs.shape[1] == generated_tokens.shape[1]
+            outputs = decoder(sequences=generated_tokens)
 
             # call back futures
             for i, output in enumerate(outputs):

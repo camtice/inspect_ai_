@@ -15,10 +15,10 @@ model:
 
 # Noise parameters
 noise:
-  std_values: [0.05, 0.05, 0.05] # currently doesn't work with noise values == 0.0
+  std_values: [0.05] # currently doesn't work with noise values == 0.0
   percentage: 1.0
   mean: 0.0
-  seeds: [2, 3]
+  seeds: [2]
   use_lora: True  # Set to true to use LoRA-based noise generation
   lora_r: 8  # Rank of the LoRA adapter (min 8)
   # Advanced LoRA options
@@ -30,7 +30,7 @@ tasks:
 
 # Logging configuration
 log:
-  log_dir: "./logs/22-3-25/test_SEED_sweep_test_2"
+  log_dir: "./logs/24-3-25/code_cleaning"
   format: json  # This will save logs in JSON format
 
 
