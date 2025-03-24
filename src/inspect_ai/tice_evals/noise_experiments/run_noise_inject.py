@@ -35,7 +35,7 @@ def run_single_eval(config, task_path, std, seed):
     print(f"  Noise std: {std}")
     print(f"  Seed: {seed}")
     
-    # Get all configuration values directly in the model_args dictionary creation
+    # Model arguments - simplified
     model_args = {
         # Model configuration
         'model_path': config['model'].get('model_path'),
@@ -48,8 +48,7 @@ def run_single_eval(config, task_path, std, seed):
         'noise_percentage': config['noise'].get('percentage'),
         'seed': seed,
         
-        # LoRA configuration
-        'use_lora': config['noise'].get('use_lora'),
+        # LoRA configuration - always enabled
         'lora_r': config['noise'].get('lora_r', 8),
     }
     
@@ -58,19 +57,17 @@ def run_single_eval(config, task_path, std, seed):
     if lora_target_modules:
         model_args["lora_target_modules"] = lora_target_modules
     
-    # Validate LoRA rank for vLLM compatibility if LoRA is enabled
-    if model_args['use_lora'] and model_args['lora_r'] not in [8, 16, 32, 64, 128, 256]:
+    # Validate LoRA rank for vLLM compatibility
+    if model_args['lora_r'] not in [8, 16, 32, 64, 128, 256]:
         print(f"Warning: vLLM only supports LoRA ranks of 8, 16, 32, 64, 128, 256. Adjusting from {model_args['lora_r']} to 8.")
         model_args['lora_r'] = 8
     
     # Log configuration information
-    print(f"  Use LoRA: {model_args['use_lora']}")
-    if model_args['use_lora']:
-        print(f"  LoRA rank: {model_args['lora_r']}")
-        if lora_target_modules:
-            print(f"  LoRA target modules: {lora_target_modules}")
-        else:
-            print(f"  LoRA target modules: auto-detect all linear layers")
+    print(f"  LoRA rank: {model_args['lora_r']}")
+    if lora_target_modules:
+        print(f"  LoRA target modules: {lora_target_modules}")
+    else:
+        print(f"  LoRA target modules: auto-detect all linear layers")
     
     print(f"  Model path: {model_args['model_path']}")
     print(f"  Tokenizer path: {model_args['tokenizer_path']}")
