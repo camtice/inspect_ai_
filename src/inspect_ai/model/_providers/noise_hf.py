@@ -23,6 +23,8 @@ from transformers import (
 from typing_extensions import override
 import psutil
 
+import multiprocessing as mp
+
 # Add imports for PEFT and vLLM
 try:
     from peft import LoraConfig, get_peft_model
@@ -356,6 +358,9 @@ class NoiseHuggingFaceAPI(ModelAPI):
             peft_model.save_pretrained(adapter_dir)
             
             return adapter_dir
+        
+        except Exception as e:
+            print(f"Error creating noise LoRA adapter: {e}")
             
         finally:
             # Clean up temporary model
@@ -384,10 +389,14 @@ class NoiseHuggingFaceAPI(ModelAPI):
                 print(f"max_model_len: {self.max_model_len}")
 
                 # Initialize vLLM model with enable_lora=True to support multi-LoRA
+                world_size = torch.cuda.device_count() or 1
+                print(f"{world_size} GPUs detected. Loading vLLM model across {world_size} GPUs.")
+
                 self.vllm_model = LLM(
                     model=self.model_path,
                     tokenizer=self.tokenizer_path,
-                    tensor_parallel_size=1,
+                    tensor_parallel_size=8,
+                    distributed_executor_backend="mp",
                     max_lora_rank=self.noise_config.lora_r,
                     trust_remote_code=True,
                     enable_lora=True,  # Enable LoRA support
